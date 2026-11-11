@@ -22,23 +22,27 @@ def _sales_prompt(today: str) -> str:
         f"{item['nama']} (kata kunci: {', '.join(item['kunci'])}; satuan: {item['satuan']})"
         for item in config.KATALOG
     )
+    units = "; ".join(config.UNIT_USAHA)
     return (
-        "Kamu adalah asisten admin pencatatan penjualan PT Lentera Agrinova Organik.\n"
+        "Kamu adalah asisten admin pencatatan transaksi Industri Pertanian Terpadu Lentera Farm.\n"
         f"Tanggal hari ini: {today}.\n"
-        "Ekstrak SEMUA transaksi dalam pesan, satu objek per barang/baris, menjadi JSON valid tanpa markdown.\n"
+        "Ekstrak SEMUA transaksi penjualan atau pembelian dalam pesan, satu objek per barang/baris, menjadi JSON valid tanpa markdown.\n"
         'Format: {"transaksi":[{"produk":"","keterangan":"","kuantitas":0,"satuan":"",'
-        '"total_harga":null,"harga_satuan":null,"tanggal":"YYYY-MM-DD","is_penjualan":true}]}\n'
+        '"total_harga":null,"harga_satuan":null,"tanggal":"YYYY-MM-DD","is_penjualan":true,"unit_usaha":""}]}\n'
         "Aturan ketat:\n"
-        "1. Jika bukan penjualan barang (rekap, salam, pertanyaan), keluarkan {\"transaksi\":[]} .\n"
+        "1. Jika bukan perintah mencatat penjualan/pembelian (rekap, salam, pertanyaan), keluarkan {\"transaksi\":[]} .\n"
         "2. Jangan lewatkan atau gabungkan transaksi berbeda.\n"
-        f"3. Katalog valid hanya: {products}. Produk lain tetap keluarkan agar ditolak aplikasi; jangan mengarang kecocokan.\n"
-        "4. kuantitas adalah jumlah barang, bukan harga. Satuan huruf besar: KG, EKOR, BUTIR, PCS sesuai katalog.\n"
-        "5. Angka keluaran berupa number polos. Titik ribuan diabaikan; koma desimal. Contoh 1.400.000=1400000, "
+        "3. Kata pembelian, beli, atau pemb sebagai penanda pengeluaran; penj atau jual sebagai penanda pemasukan.\n"
+        f"4. Untuk penjualan, katalog valid hanya: {products}. Produk lain tetap keluarkan agar ditolak aplikasi.\n"
+        f"5. Pembelian boleh berupa barang/jasa apa pun. Set is_penjualan=false dan isi unit_usaha dengan nama tab persis dari daftar ini: {units}.\n"
+        "6. Jangan menebak unit pembelian. Jika pesan tidak menyebut unit dengan jelas, isi unit_usaha kosong.\n"
+        "7. kuantitas adalah jumlah barang, bukan harga. Satuan huruf besar sesuai pesan/katalog.\n"
+        "8. Angka keluaran berupa number polos. Titik ribuan diabaikan; koma desimal. Contoh 1.400.000=1400000, "
         "2,5 jt=2500000, 2,3 ribu=2300. rb/ribu/k dikali 1000; jt/juta dikali 1000000.\n"
-        "6. Isi total_harga hanya jika disebut sebagai jumlah total. Isi harga_satuan hanya jika harga per item/kg/ekor/@ disebut. "
+        "9. Isi total_harga hanya jika disebut sebagai jumlah total. Isi harga_satuan hanya jika harga per item/kg/ekor/@ disebut. "
         "Jangan mengisi keduanya dan jangan menghitung perkalian sendiri.\n"
-        "7. Keterangan singkat mengikuti pesan; tanggal gunakan YYYY-MM-DD dan default hari ini.\n"
-        "8. Jangan berikan reasoning, tag thinking, atau teks di luar JSON."
+        "10. Keterangan singkat mengikuti pesan; tanggal gunakan YYYY-MM-DD dan default hari ini.\n"
+        "11. Jangan berikan reasoning, tag thinking, atau teks di luar JSON."
     )
 
 

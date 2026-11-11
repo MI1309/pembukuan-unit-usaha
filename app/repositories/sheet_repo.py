@@ -63,6 +63,36 @@ def append_row(sheet_name: str, row: list):
     sheet.append_row(row)
     invalidate_cache(sheet_name)
 
+
+def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
+    spreadsheet = get_spreadsheet()
+    requests = []
+    for sheet_name, values in rows_by_sheet:
+        worksheet = get_sheet(sheet_name, create=False)
+        if not worksheet:
+            raise ValueError(f"Worksheet not found: {sheet_name}")
+        cells = []
+        for value in values:
+            if isinstance(value, bool):
+                cell_value = {"boolValue": value}
+            elif isinstance(value, (int, float)):
+                cell_value = {"numberValue": value}
+            else:
+                cell_value = {"stringValue": str(value or "")}
+            cells.append({"userEnteredValue": cell_value})
+        requests.append({
+            "appendCells": {
+                "sheetId": worksheet.id,
+                "rows": [{"values": cells}],
+                "fields": "userEnteredValue",
+            }
+        })
+
+    spreadsheet.batch_update({"requests": requests})
+    for sheet_name, _ in rows_by_sheet:
+        invalidate_cache(sheet_name)
+
+
 def update_cell(sheet_name: str, row: int, column: int, value):
     """Update a worksheet cell using Google Sheets' 1-based coordinates."""
     sheet = get_sheet(sheet_name, create=False)

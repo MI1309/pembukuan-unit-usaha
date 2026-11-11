@@ -29,6 +29,25 @@ def get_unit_sheet(produk_nama: str) -> str:
     return "(3)Pertanian "
 
 
+def _resolve_unit_sheet(value: str) -> str | None:
+    text = re.sub(r"\s+", " ", str(value or "").strip().lower())
+    aliases = {
+        "(3)pertanian": ["pertanian", "pertanian anggur", "pertanian jagung", "pertanian padi", "pertanian melon"],
+        "(4)ternak ayam fazza": ["ternak ayam fazza", "ayam fazza"],
+        "(5)ternak ayam emran": ["ternak ayam emran", "ayam emran"],
+        "(6)perikanan": ["perikanan", "perikanan emran"],
+        "(7)pabrik pupuk": ["pabrik pupuk"],
+    }
+    for unit in config.UNIT_USAHA:
+        normalized_unit = re.sub(r"\s+", " ", unit.strip().lower())
+        if text == normalized_unit:
+            return unit
+        for canonical, unit_aliases in aliases.items():
+            if normalized_unit == canonical and text in unit_aliases:
+                return unit
+    return None
+
+
 def _resolve_product(raw: dict) -> dict | None:
     product_text = f"{raw.get('produk', '')} {raw.get('keterangan', '')}".lower()
     for item in config.KATALOG:
@@ -40,11 +59,14 @@ def _resolve_product(raw: dict) -> dict | None:
 def _normalise_sale(raw: dict) -> tuple[dict | None, str | None]:
     if not isinstance(raw, dict):
         return None, None
-    if raw.get("is_penjualan") is False:
-        return None, None
-    product = _resolve_product(raw)
-    if not product:
-        return None, f"{raw.get('produk', 'Produk tidak dikenal')} — produk tidak dikenal"
+    is_sale = raw.get("is_penjualan") is not False and str(raw.get("jenis", "")).strip().lower() not in {"pembelian", "pengeluaran"}
+    product = _resolve_product(raw) if is_sale else None
+    product_name = product["nama"] if product else str(raw.get("produk", "Barang pembelian")).strip()
+    if is_sale and not product:
+        return None, f"{raw.get('produk', 'Produk tidak dikenal')} — produk penjualan tidak dikenal"
+    unit_sheet = get_unit_sheet(product_name) if is_sale else _resolve_unit_sheet(raw.get("unit_usaha", ""))
+    if not is_sale and not unit_sheet:
+        return None, f"{product_name} — sebutkan unit usaha pembelian (Pertanian, Ternak Ayam Fazza, Ternak Ayam Emran, Perikanan, atau Pabrik Pupuk)"
     try:
         quantity = float(raw.get("kuantitas") or 0)
     except (TypeError, ValueError):
@@ -56,10 +78,10 @@ def _normalise_sale(raw: dict) -> tuple[dict | None, str | None]:
         return None, f"{product['nama']} {format_rupiah(raw_total)} — jumlah tidak disebut; sertakan kuantitas barang"
     if not total and unit_price and quantity:
         total = round(unit_price * quantity)
-    if quantity <= 0 or total <= 0:
-        return None, f"{product['nama']} — jumlah/harga salah"
-    if quantity >= 1_000_000 or quantity >= total:
-        return None, f"{product['nama']} {quantity:g} {product['satuan']} — jumlah tidak wajar atau tertukar dengan harga"
+    if total <= 0 or (is_sale and quantity <= 0) or (not is_sale and quantity < 0):
+        return None, f"{product_name} — jumlah/harga salah"
+    if quantity >= 1_000_000 or (is_sale and quantity >= total):
+        return None, f"{product_name} {quantity:g} — jumlah tidak wajar atau tertukar dengan harga"
     current_time = now_tz()
     today = current_time.date()
     sale_date = _parse_date(raw.get("tanggal")) or today
@@ -71,16 +93,20 @@ def _normalise_sale(raw: dict) -> tuple[dict | None, str | None]:
         sale_date = today
     description = str(raw.get("keterangan") or "").strip()
     if not description:
-        description = f"Penj. {product['nama'].lower()} {quantity:g} {product['satuan'].lower()}"
+        prefix = "Penj." if is_sale else "Pembelian"
+        unit = product["satuan"] if product else str(raw.get("satuan") or "").strip()
+        quantity_text = f" {quantity:g} {unit}" if quantity > 0 else ""
+        description = f"{prefix} {product_name.lower()}{quantity_text}"
     return {
-        "produk": product["nama"],
-        "kategori": product["kategori"],
-        "satuan": product["satuan"],
+        "produk": product_name,
+        "kategori": product["kategori"] if product else "PEMBELIAN",
+        "satuan": product["satuan"] if product else str(raw.get("satuan") or "").strip(),
         "kuantitas": quantity,
         "penjualan": total,
+        "is_penjualan": is_sale,
         "keterangan": description,
         "tanggal": sale_date,
-        "unit": get_unit_sheet(product["nama"]),
+        "unit": unit_sheet,
     }, None
 
 
@@ -117,12 +143,24 @@ def _next_invoice(sale_date: date) -> str:
 
 def _save_sale(sale: dict) -> str:
     invoice = _next_invoice(sale["tanggal"])
-    row = [
+    is_sale = sale.get("is_penjualan", True)
+    income = sale["penjualan"] if is_sale else 0
+    expense = 0 if is_sale else sale["penjualan"]
+    unit_row = [
         invoice, sale["tanggal"].strftime("%Y-%m-%d"), sale["produk"],
         sale["keterangan"], sale["kuantitas"], sale["satuan"],
-        sale["penjualan"], 0, sale["penjualan"],
+        income, expense, income - expense,
     ]
-    sheet_repo.append_row(sale["unit"], row)
+    unit_label = re.sub(r"^\(\d+\)\s*", "", sale["unit"]).strip()
+    detail_description = f"Unit: {unit_label} | Invoice: {invoice} | {sale['keterangan']}"
+    daily_detail_row = [
+        sale["tanggal"].strftime("%Y-%m-%d"), sale["produk"], detail_description,
+        sale["kuantitas"], sale["satuan"], income, expense,
+    ]
+    sheet_repo.append_rows_atomically([
+        (sale["unit"], unit_row),
+        ("(2)Rincian Transaksi Harian", daily_detail_row),
+    ])
     return invoice
 
 
@@ -164,14 +202,20 @@ def process_sales(message: str, confirmed: bool = False) -> tuple[bool, str, dic
 
     lines = []
     if saved:
-        lines += [f"✅ *{len(saved)} TRANSAKSI BERHASIL DISIMPAN*", "━━━━━━━━━━━━━━━━━━"]
+        transaction_types = {sale.get("is_penjualan", True) for sale, _ in saved}
+        heading = "PENJUALAN / PEMASUKAN" if transaction_types == {True} else (
+            "PEMBELIAN / PENGELUARAN" if transaction_types == {False} else "TRANSAKSI"
+        )
+        lines += [f"✅ *{len(saved)} {heading} BERHASIL DISIMPAN*", "━━━━━━━━━━━━━━━━━━"]
         total = 0
         for index, (sale, invoice) in enumerate(saved, start=1):
             total += sale["penjualan"]
+            amount_label = "Pemasukan" if sale.get("is_penjualan", True) else "Pengeluaran"
+            quantity_text = f"{sale['kuantitas']:g} {sale['satuan']} → " if sale["kuantitas"] > 0 else ""
             lines += [f"{index}. *{sale['produk']}*", f"   🧾 {invoice}",
                       f"   📅 {format_tanggal_id(datetime.combine(sale['tanggal'], datetime.min.time()))}",
-                      f"   ⚖️ {sale['kuantitas']:g} {sale['satuan']} → 💰 {format_rupiah(sale['penjualan'])}"]
-        lines += ["━━━━━━━━━━━━━━━━━━", f"💰 *Total: {format_rupiah(total)}*"]
+                      f"   ⚖️ {quantity_text}💰 {amount_label}: {format_rupiah(sale['penjualan'])}"]
+        lines += ["━━━━━━━━━━━━━━━━━━", f"💰 *Total transaksi: {format_rupiah(total)}*"]
     if failed:
         if saved:
             lines.append("")
@@ -205,16 +249,19 @@ def _sales_rows() -> list[dict]:
             product = str(row.get("Nama Barang/Jasa /Produk", row.get("Produk", ""))).strip()
             if not product or re.match(r"^(sub)?total", product, re.I):
                 continue
+            amount = parse_amount(row.get("Pemasukan (Rp)", row.get("Pemasukan", 0)))
+            if amount <= 0:
+                continue
             sales.append({
                 "date": sale_date,
                 "product": product,
                 "unit": str(row.get("Satuan (Rp)", row.get("Satuan", ""))).strip(),
                 "quantity": _number(row.get("Kuantitas", 0)),
-                "amount": parse_amount(row.get("Pemasukan (Rp)", row.get("Pemasukan", 0))),
+                "amount": amount,
             })
     return sales
 
-
+# private nomor functions
 def _number(value) -> float:
     try:
         return float(value or 0)
@@ -427,7 +474,13 @@ def handle_help_command(message: str) -> str | None:
         "_penj. telur ayam fazza 786 butir 1.179.000_\n"
         "_penj. anggur helio 32 kg 960rb_\n"
         "_penj. lele fazza 50 ekor @2000_\n\n"
+        "Alias: `penj` / `jual` = pemasukan; `pembelian` / `beli` / `pemb` = pengeluaran.\n\n"
+        "🧾 *PEMBELIAN / PENGELUARAN*\nSertakan barang, jumlah, total harga, dan unit usaha:\n"
+        "_pembelian herbisida 60 botol total 3.600.000 unit Pertanian_\n"
+        "_beli pakan ayam 10 karung total 850rb unit Ternak Ayam Fazza_\n"
+        "Unit: Pertanian, Ternak Ayam Fazza, Ternak Ayam Emran, Perikanan, atau Pabrik Pupuk.\n\n"
         "✅ Satu pesan dapat berisi banyak transaksi, biasanya satu transaksi per baris.\n"
+        "✅ Semua transaksi juga tercatat di `(2)Rincian Transaksi Harian` dengan unit usaha dan nomor invoice.\n"
         "✅ Format harga: `350rb` / `350 ribu`, `2,5 jt` / `2,5 juta`, `1.400.000`, atau `@2000` per satuan.\n\n"
         "📊 *2. REKAP PENJUALAN*\n"
         "• `rekap` → hari ini; `rekap kemarin` → kemarin\n"

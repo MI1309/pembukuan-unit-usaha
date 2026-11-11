@@ -44,10 +44,14 @@ def _first_value(payload: dict, *keys: str) -> str:
 
 @router.post("/webhook")
 async def fonnte_webhook(request: Request):
+    data = await _webhook_payload(request)
+    return process_webhook_payload(data)
+
+
+def process_webhook_payload(data: dict) -> dict:
     sender = ""
     message = ""
     try:
-        data = await _webhook_payload(request)
         expected_secret = str(config.WEBHOOK_SECRET or "")
         if not expected_secret or _first_value(data, "secret") != expected_secret:
             raise HTTPException(status_code=401, detail="Unauthorized")

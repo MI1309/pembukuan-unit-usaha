@@ -32,7 +32,7 @@ from pythonanywhere_wsgi import application
 5. Atur URL webhook Fonnte menjadi `https://<username>.pythonanywhere.com/webhook`, lalu masukkan `WEBHOOK_SECRET` yang sama pada pengaturan webhook Fonnte.
 6. Buka `https://<username>.pythonanywhere.com/` dan pastikan respons status kesehatan aplikasi muncul.
 
-Titik masuk WSGI menggunakan `a2wsgi` untuk membungkus FastAPI. Scheduler backup tidak dijalankan di dalam web worker.
+Titik masuk WSGI menggunakan dispatcher WSGI native, sehingga pemeriksaan kesehatan dan permintaan Fonnte tidak melewati jembatan event-loop ASGI. FastAPI tetap tersedia melalui `app.main` untuk hosting lokal yang kompatibel dengan ASGI. Scheduler backup tidak dijalankan di dalam web worker.
 
 ## Task Backup Harian
 

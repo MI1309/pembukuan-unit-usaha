@@ -87,12 +87,6 @@ def _normalise_sale(raw: dict) -> tuple[dict | None, str | None]:
     current_time = now_tz()
     today = current_time.date()
     sale_date = _parse_date(raw.get("tanggal")) or today
-    proposed_datetime = current_time.replace(
-        year=sale_date.year, month=sale_date.month, day=sale_date.day,
-        hour=0, minute=0, second=0, microsecond=0,
-    )
-    if proposed_datetime - current_time > timedelta(hours=36):
-        sale_date = today
     description = str(raw.get("keterangan") or "").strip()
     if not unit_price and quantity:
         unit_price = round(total / quantity)

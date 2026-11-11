@@ -72,20 +72,14 @@ def _normalise_sale(raw: dict) -> tuple[dict | None, str | None]:
         quantity = float(raw.get("kuantitas") or 0)
     except (TypeError, ValueError):
         quantity = 0
-    total = parse_amount(raw.get("total_harga") or raw.get("penjualan"))
     unit_price = parse_amount(raw.get("harga_satuan"))
-    raw_total = parse_amount(raw.get("total_harga"))
-    purchase_unit = str(raw.get("satuan") or "").strip()
-    if quantity > 0 and raw_total > 0 and quantity == raw_total:
-        total = raw_total
-    if not total and unit_price and quantity:
-        total = round(unit_price * quantity)
-    if not is_sale and (quantity <= 0 or not purchase_unit):
+    raw_total = parse_amount(raw.get("total_harga") or raw.get("penjualan"))
+    quantity_unit = product["satuan"] if product else str(raw.get("satuan") or "").strip()
+    total = round(unit_price * quantity) if unit_price and quantity else raw_total
+    if not is_sale and (quantity <= 0 or not quantity_unit):
         return None, f"{product_name} — pembelian wajib mencantumkan kuantitas dan satuan"
-    if not total and not unit_price:
+    if not total:
         return None, f"{product_name} — harga satuan atau total harus dicantumkan"
-    if not total and unit_price and quantity:
-        total = round(unit_price * quantity)
     if total <= 0 or quantity <= 0:
         return None, f"{product_name} — jumlah/harga salah"
     if quantity >= 1_000_000 or (is_sale and quantity >= total):
@@ -100,15 +94,13 @@ def _normalise_sale(raw: dict) -> tuple[dict | None, str | None]:
     if proposed_datetime - current_time > timedelta(hours=36):
         sale_date = today
     description = str(raw.get("keterangan") or "").strip()
-    if not description:
-        prefix = "Penj." if is_sale else "Pembelian"
-        unit = product["satuan"] if product else str(raw.get("satuan") or "").strip()
-        quantity_text = f" {quantity:g} {unit}" if quantity > 0 else ""
-        description = f"{prefix} {product_name.lower()}{quantity_text}"
+    if not unit_price and quantity:
+        unit_price = round(total / quantity)
     return {
         "produk": product_name,
         "kategori": product["kategori"] if product else "PEMBELIAN",
-        "satuan": product["satuan"] if product else purchase_unit,
+        "satuan": unit_price,
+        "unit_kuantitas": quantity_unit,
         "kuantitas": quantity,
         "penjualan": total,
         "is_penjualan": is_sale,
@@ -116,37 +108,6 @@ def _normalise_sale(raw: dict) -> tuple[dict | None, str | None]:
         "tanggal": sale_date,
         "unit": unit_sheet,
     }, None
-
-
-def _meta_sheet() -> None:
-    sheet = sheet_repo.get_sheet("_Meta")
-    if not sheet.get_all_values():
-        sheet_repo.append_row("_Meta", ["Key", "Value"])
-        sheet_repo.append_row("_Meta", ["INV_COUNTER", 0])
-
-
-def _next_invoice(sale_date: date) -> str:
-    _meta_sheet()
-    meta = sheet_repo.get_all_records("_Meta")
-    counter_row = None
-    counter = 0
-    for row_number, record in enumerate(meta, start=2):
-        if str(record.get("Key", "")).strip() == "INV_COUNTER":
-            counter_row = row_number
-            counter = parse_amount(record.get("Value", 0))
-            break
-    if not counter:
-            records_by_unit = sheet_repo.get_all_records_many(config.UNIT_USAHA)
-            for records in records_by_unit.values():
-                for record in records:
-                    match = re.search(r"INV/(\d+)\s*$", str(record.get("Nomor", "")))
-                    if match:
-                        counter = max(counter, int(match.group(1)))
-    if counter_row is None:
-        counter_row = len(meta) + 2
-    counter += 1
-    sheet_repo.update_cell("_Meta", counter_row, 2, counter) if counter_row <= len(meta) + 1 else sheet_repo.append_row("_Meta", ["INV_COUNTER", counter])
-    return f"{sale_date:%Y.%m.%d}/INV/{counter}"
 
 
 def _daily_period_label(month_date: date) -> str:
@@ -185,28 +146,32 @@ def _maybe_archive_daily_detail(sale_date: date) -> None:
 
 
 def _save_sale(sale: dict) -> str:
-    invoice = _next_invoice(sale["tanggal"])
     _maybe_archive_daily_detail(sale["tanggal"])
     is_sale = sale.get("is_penjualan", True)
     income = sale["penjualan"] if is_sale else ""
     expense = "" if is_sale else sale["penjualan"]
     balance_change = sale["penjualan"] if is_sale else -sale["penjualan"]
+    date_text = _format_sheet_date(sale["tanggal"])
+    quantity_text = f"{sale['kuantitas']:g} {sale['unit_kuantitas']}".strip()
     unit_row = [
-        invoice, sale["tanggal"].strftime("%Y-%m-%d"), sale["produk"],
-        sale["keterangan"], sale["kuantitas"], sale["satuan"],
+        "", date_text, sale["produk"],
+        sale["keterangan"], quantity_text, sale["satuan"],
         income, expense, balance_change,
     ]
-    unit_label = re.sub(r"^\(\d+\)\s*", "", sale["unit"]).strip()
-    detail_description = f"Unit: {unit_label} | Invoice: {invoice} | {sale['keterangan']}"
     daily_detail_row = [
-        sale["tanggal"].strftime("%Y-%m-%d"), sale["produk"], detail_description,
-        sale["kuantitas"], sale["satuan"], income, expense,
+        date_text, sale["produk"], sale["keterangan"],
+        quantity_text, sale["satuan"], income, expense,
     ]
     sheet_repo.append_rows_atomically([
         (sale["unit"], unit_row),
         ("(2)Rincian Transaksi Harian", daily_detail_row),
     ])
-    return invoice
+    return None
+
+
+def _format_sheet_date(value: date) -> str:
+    month_names = ("Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des")
+    return f"{value.day} {month_names[value.month - 1]} {value.year}"
 
 
 def _confirm_text(sale: dict) -> str:
@@ -240,24 +205,24 @@ def process_sales(message: str, confirmed: bool = False) -> tuple[bool, str, dic
     with _SALES_LOCK:
         for sale in prepared:
             try:
-                invoice = _save_sale(sale)
-                saved.append((sale, invoice))
+                _save_sale(sale)
+                saved.append(sale)
             except Exception as error:
                 failed.append(f"{sale['produk']} — {error}")
 
     lines = []
     if saved:
-        transaction_types = {sale.get("is_penjualan", True) for sale, _ in saved}
+        transaction_types = {sale.get("is_penjualan", True) for sale in saved}
         heading = "PENJUALAN / PEMASUKAN" if transaction_types == {True} else (
             "PEMBELIAN / PENGELUARAN" if transaction_types == {False} else "TRANSAKSI"
         )
         lines += [f"✅ *{len(saved)} {heading} BERHASIL DISIMPAN*", "━━━━━━━━━━━━━━━━━━"]
-        total = sum(sale["penjualan"] for sale, _ in saved)
+        total = sum(sale["penjualan"] for sale in saved)
         if len(saved) <= 8:
-            for index, (sale, invoice) in enumerate(saved, start=1):
+            for index, sale in enumerate(saved, start=1):
                 amount_label = "Pemasukan" if sale.get("is_penjualan", True) else "Pengeluaran"
-                quantity_text = f"{sale['kuantitas']:g} {sale['satuan']} → " if sale["kuantitas"] > 0 else ""
-                lines += [f"{index}. *{sale['produk']}*", f"   🧾 {invoice}",
+                quantity_text = f"{sale['kuantitas']:g} {sale['unit_kuantitas']} → " if sale["kuantitas"] > 0 else ""
+                lines += [f"{index}. *{sale['produk']}*",
                           f"   📅 {format_tanggal_id(datetime.combine(sale['tanggal'], datetime.min.time()))}",
                           f"   ⚖️ {quantity_text}💰 {amount_label}: {format_rupiah(sale['penjualan'])}"]
         else:
@@ -270,7 +235,7 @@ def process_sales(message: str, confirmed: bool = False) -> tuple[bool, str, dic
         lines.extend(f"• {error}" for error in failed[:10])
         if len(failed) > 10:
             lines.append(f"... dan {len(failed) - 10} baris gagal lainnya")
-    return True, "\n".join(lines), {"invoices": [invoice for _, invoice in saved]}
+    return True, "\n".join(lines), {"saved": len(saved)}
 
 
 def _parse_date(value) -> date | None:
@@ -279,6 +244,14 @@ def _parse_date(value) -> date | None:
     if isinstance(value, date):
         return value
     text = str(value or "").strip()
+    localized = re.fullmatch(r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", text)
+    if localized:
+        month = MONTH_ALIASES.get(localized.group(2).lower())
+        if month:
+            try:
+                return date(int(localized.group(3)), month, int(localized.group(1)))
+            except ValueError:
+                return None
     for pattern in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y.%m.%d", "%d %b %Y", "%d %B %Y"):
         try:
             return datetime.strptime(text, pattern).date()
@@ -588,7 +561,8 @@ def handle_help_command(message: str) -> str | None:
         "_pemb PDAM | tagihan November | 1 | bulan | 180000 | unit Pertanian_\n"
         "Unit: Pertanian, Ternak Ayam Fazza, Ternak Ayam Emran, Perikanan, atau Pabrik Pupuk.\n\n"
         "✅ Satu pesan dapat berisi banyak transaksi, biasanya satu transaksi per baris.\n"
-        "✅ Penjualan dan pembelian dicatat di ledger unit serta `(2)Rincian Transaksi Harian` dengan unit usaha dan nomor invoice.\n"
+        "✅ Tanggal dicatat dengan format tgl, nama bulan singkat, tahun; keterangan mengikuti isi pesan.\n"
+        "✅ Kuantitas dicatat bersama unit barang; harga satuan dikalikan kuantitas untuk mengisi pemasukan atau pengeluaran.\n"
         "✅ Harga satuan dipakai untuk menghitung total otomatis: kuantitas × harga satuan.\n\n"
         "📊 *2. REKAP PENJUALAN*\n"
         "• `rekap` → hari ini; `rekap kemarin` → kemarin\n"

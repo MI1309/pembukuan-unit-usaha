@@ -84,8 +84,8 @@ def _parse_pipe_transactions(message: str) -> dict | None:
             "keterangan": description,
             "kuantitas": quantity.replace(".", "").replace(",", "."),
             "satuan": unit,
-            "total_harga": price_text.replace(".", "").replace(",", ""),
-            "harga_satuan": None,
+            "total_harga": None,
+            "harga_satuan": price_text.replace(".", "").replace(",", ""),
             "is_penjualan": is_sale,
             "unit_usaha": "" if is_sale else business_unit,
         })

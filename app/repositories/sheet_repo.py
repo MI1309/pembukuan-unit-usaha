@@ -1,3 +1,4 @@
+import re
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from threading import RLock
@@ -15,6 +16,7 @@ _worksheet_cache = {}
 _record_cache = {}
 _cache_lock = RLock()
 _READ_CACHE_SECONDS = 3
+_SIMPLE_SHEET_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def get_client():
@@ -112,6 +114,14 @@ def _records_from_values(values: list[list]) -> list[dict]:
     return records
 
 
+def _a1_column_range(sheet_name: str) -> str:
+    if _SIMPLE_SHEET_NAME.fullmatch(sheet_name):
+        sheet_reference = sheet_name
+    else:
+        sheet_reference = f"'{sheet_name.replace(chr(39), chr(39) * 2)}'"
+    return f"{sheet_reference}!A:Z"
+
+
 def get_all_records_many(sheet_names: list[str]) -> dict[str, list[dict]]:
     with _cache_lock:
         now = monotonic()
@@ -125,7 +135,7 @@ def get_all_records_many(sheet_names: list[str]) -> dict[str, list[dict]]:
                 uncached_names.append(name)
 
         if uncached_names:
-            ranges = [f"'{name.replace(chr(39), chr(39) * 2)}'!A:Z" for name in uncached_names]
+            ranges = [_a1_column_range(name) for name in uncached_names]
             response = get_spreadsheet().values_batch_get(ranges, params={"majorDimension": "ROWS"})
             value_ranges = response.get("valueRanges", [])
             for name, value_range in zip(uncached_names, value_ranges):

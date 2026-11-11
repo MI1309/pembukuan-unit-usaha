@@ -154,6 +154,11 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
 
 def _format_daily_archive(worksheet) -> None:
     sheet_id = worksheet.id
+    metadata = worksheet.spreadsheet.fetch_sheet_metadata(params={"includeGridData": False})
+    sheet_metadata = next(
+        sheet for sheet in metadata.get("sheets", [])
+        if sheet.get("properties", {}).get("sheetId") == sheet_id
+    )
     requests = [
         {
             "repeatCell": {
@@ -170,6 +175,7 @@ def _format_daily_archive(worksheet) -> None:
                         "foregroundColor": {"red": 1, "green": 1, "blue": 1},
                         "bold": True,
                     },
+                    "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True, "fontSize": 11},
                     "horizontalAlignment": "CENTER",
                     "verticalAlignment": "MIDDLE",
                     "wrapStrategy": "WRAP",
@@ -185,8 +191,19 @@ def _format_daily_archive(worksheet) -> None:
                     "startColumnIndex": 0,
                     "endColumnIndex": 8,
                 },
+                "cell": {"userEnteredFormat": {}},
+                "fields": "userEnteredFormat.backgroundColor",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 8,
+                },
                 "cell": {"userEnteredFormat": {
-                    "backgroundColor": {"red": 0.97, "green": 0.98, "blue": 1.0},
                     "verticalAlignment": "MIDDLE",
                     "wrapStrategy": "WRAP",
                     "borders": {"bottom": {
@@ -194,7 +211,23 @@ def _format_daily_archive(worksheet) -> None:
                         "color": {"red": 0.86, "green": 0.89, "blue": 0.92},
                     }},
                 }},
-                "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.verticalAlignment,userEnteredFormat.wrapStrategy,userEnteredFormat.borders",
+                "fields": "userEnteredFormat.verticalAlignment,userEnteredFormat.wrapStrategy,userEnteredFormat.borders",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 1,
+                },
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": {"red": 0.89, "green": 0.95, "blue": 0.92},
+                    "textFormat": {"bold": True, "foregroundColor": {"red": 0.16, "green": 0.36, "blue": 0.29}},
+                    "horizontalAlignment": "CENTER",
+                }},
+                "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat,userEnteredFormat.horizontalAlignment",
             }
         },
         {
@@ -205,9 +238,7 @@ def _format_daily_archive(worksheet) -> None:
                     "startColumnIndex": 1,
                     "endColumnIndex": 2,
                 },
-                "cell": {"userEnteredFormat": {"numberFormat": {
-                    "type": "DATE", "pattern": "dd mmm yyyy",
-                }}},
+                "cell": {"userEnteredFormat": {"numberFormat": {"type": "DATE", "pattern": "dd mmm yyyy"}}},
                 "fields": "userEnteredFormat.numberFormat",
             }
         },
@@ -228,8 +259,22 @@ def _format_daily_archive(worksheet) -> None:
         },
         {
             "updateSheetProperties": {
-                "properties": {"sheetId": sheet_id, "gridProperties": {"frozenRowCount": 1}},
-                "fields": "gridProperties.frozenRowCount",
+                "properties": {"sheetId": sheet_id, "gridProperties": {"frozenRowCount": 1, "hideGridlines": True}},
+                "fields": "gridProperties.frozenRowCount,gridProperties.hideGridlines",
+            }
+        },
+        {
+            "updateDimensionProperties": {
+                "range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": 0, "endIndex": 1},
+                "properties": {"pixelSize": 42},
+                "fields": "pixelSize",
+            }
+        },
+        {
+            "updateDimensionProperties": {
+                "range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": 1, "endIndex": 1000},
+                "properties": {"pixelSize": 34},
+                "fields": "pixelSize",
             }
         },
         {
@@ -243,6 +288,25 @@ def _format_daily_archive(worksheet) -> None:
             }
         },
     ]
+    for banded_range in sheet_metadata.get("bandedRanges", []):
+        banded_range_id = banded_range.get("bandedRangeId")
+        if banded_range_id is not None:
+            requests.append({"deleteBanding": {"bandedRangeId": banded_range_id}})
+    requests.append({
+        "addBanding": {"bandedRange": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 0,
+                "startColumnIndex": 0,
+                "endColumnIndex": 8,
+            },
+            "rowProperties": {
+                "headerColor": {"red": 0.12, "green": 0.22, "blue": 0.39},
+                "firstBandColor": {"red": 1, "green": 1, "blue": 1},
+                "secondBandColor": {"red": 0.93, "green": 0.96, "blue": 0.98},
+            },
+        }}
+    })
     widths = [115, 125, 230, 320, 120, 130, 155, 155]
     requests.extend({
         "updateDimensionProperties": {
@@ -287,72 +351,6 @@ def archive_daily_detail(archive_month: str, rows: list[list], new_period_label:
     invalidate_cache("(2)Rincian Transaksi Harian")
     invalidate_cache("_ArsipRincianHarian")
     return len(archived_rows)
-
-
-def archive_unit_transactions(rows_by_unit: dict[str, list[tuple[int, list]]], archived_at: str) -> int:
-    spreadsheet = get_spreadsheet()
-    archive = get_sheet("_ArsipTransaksi")
-    existing = archive.get_all_values()
-    archive_rows = []
-    requests = []
-
-    if not existing:
-        archive_rows.append([
-            "Unit Usaha", "Nomor", "Tanggal", "Nama Barang/Jasa/Produk", "Keterangan Transaksi",
-            "Kuantitas", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Saldo", "Diarsipkan",
-        ])
-
-    archived_count = 0
-    for unit, entries in rows_by_unit.items():
-        worksheet = get_sheet(unit, create=False)
-        if not worksheet or not entries:
-            continue
-        for _, row in entries:
-            archive_rows.append([unit, *(row[:9] + [""] * max(0, 9 - len(row))), archived_at])
-        archived_count += len(entries)
-
-        row_numbers = sorted({row_number for row_number, _ in entries}, reverse=True)
-        ranges = []
-        for row_number in row_numbers:
-            start_index = row_number - 1
-            if ranges and start_index + 1 == ranges[-1][0]:
-                ranges[-1][0] = start_index
-            else:
-                ranges.append([start_index, start_index + 1])
-        requests.extend({
-            "deleteDimension": {
-                "range": {
-                    "sheetId": worksheet.id,
-                    "dimension": "ROWS",
-                    "startIndex": start_index,
-                    "endIndex": end_index,
-                }
-            }
-        } for start_index, end_index in ranges)
-
-    if archive_rows:
-        archive_data = []
-        for row in archive_rows:
-            archive_data.append({"values": [
-                {"userEnteredValue": {"stringValue": str(value or "")}}
-                for value in row
-            ]})
-        requests.insert(0, {
-            "appendCells": {
-                "sheetId": archive.id,
-                "rows": archive_data,
-                "fields": "userEnteredValue",
-            }
-        })
-
-    if requests:
-        spreadsheet.batch_update({"requests": requests})
-    for unit, entries in rows_by_unit.items():
-        if entries:
-            invalidate_cache(unit)
-    if archive_rows:
-        invalidate_cache("_ArsipTransaksi")
-    return archived_count
 
 
 def update_cell(sheet_name: str, row: int, column: int, value):

@@ -104,8 +104,13 @@ def process_webhook_payload(data: dict) -> dict:
 
         help_reply = sales_service.handle_help_command(message)
         if help_reply is not None:
-            send_whatsapp(sender, help_reply)
-            webhook_state.log_event(sender, message, "HELP_QUERY")
+            sent = send_whatsapp(sender, help_reply)
+            webhook_state.log_event(
+                sender,
+                message,
+                "HELP_QUERY" if sent else "HELP_SEND_FAILED",
+                error="" if sent else "fonnte_send_failed",
+            )
             return {"status": "help"}
 
         rekap_reply = sales_service.process_rekap(message)

@@ -533,21 +533,46 @@ def _attendance_summary(nik: str | None, period: str) -> str:
 
 
 def _help_text(admin: bool) -> str:
-    lines = ["👥 *PANDUAN LENGKAP KARYAWAN*", f"_{config.COMPANY}_", "━━━━━━━━━━━━━━━━━━",
-             "🕐 *FITUR KARYAWAN (Via No. HP Terdaftar)*",
-             "• `masuk` / `pulang` → Presensi masuk dan pulang",
-             "• `sakit demam` / `izin acara keluarga` / `cuti alasan`",
-             "• `presensi saya` → Rekap absensi bulan berjalan",
-             "• `slip gaji` / `slip gaji 2026-10` → Slip gaji sendiri",
-             "• `cek data saya` → Lihat profil pribadi"]
+    lines = [
+        "👥 *PANDUAN LENGKAP KARYAWAN*", f"_{config.COMPANY}_", "━━━━━━━━━━━━━━━━━━",
+        "🕐 *FITUR KARYAWAN (Via No. HP Terdaftar)*",
+        "• `masuk` → Catat jam masuk",
+        "• `pulang` → Catat jam pulang dan lembur",
+        "• `sakit demam` / `izin acara keluarga` / `cuti keperluan keluarga`",
+        "• `presensi saya` → Rekap presensi bulan ini",
+        "• `slip gaji` / `slip gaji 2026-10` → Slip gaji sendiri",
+        "• `cek data saya` → Lihat profil pribadi",
+    ]
     if admin:
-        lines += ["", "🛠️ *MENU ADMIN*", "• `form karyawan` atau `tambah karyawan Nama | Jabatan | Dept | Gaji | HP | Alamat`",
-                  "• `daftar karyawan [semua|nonaktif]`", "• `cek karyawan 001`",
-                  "• `ubah karyawan 001 gaji 5jt` / `aktifkan karyawan 001` / `nonaktifkan karyawan 001`",
-                  "• `presensi hari ini` / `masuk 001` / `pulang 001`",
-                  "• `presensi 001 izin alasan` / `presensi 001 alpha 2026-10-15 alasan`",
-                  "• `rekap presensi [001] [2026-10]`", "• `bonus 001 500rb THR` / `potong 001 100rb kasbon`",
-                  "• `slip gaji 001` / `rekap gaji` / `proses gaji 2026-10`"]
+        lines += [
+            "", "🛠️ *MENU KELOLA DATA (KHUSUS ADMIN)*", "──────────────────",
+            "➕ *1. TAMBAH KARYAWAN*",
+            "• `form karyawan` → Minta template formulir",
+            "• Format cepat: `tambah karyawan Nama | Jabatan | Dept | Gaji | No HP | Alamat`",
+            "• Formulir lengkap: kirim beberapa baris `Nama:`, `Posisi tugas:`, `Departemen:`, `Gaji:`, `No HP:`, dan data lain",
+            "", "🔍 *2. CEK DAN DAFTAR KARYAWAN*",
+            "• `daftar karyawan` → Karyawan aktif",
+            "• `daftar karyawan semua` / `daftar karyawan nonaktif`",
+            "• `cek karyawan 001` → Biodata lengkap",
+            "", "✏️ *3. UBAH DATA KARYAWAN*",
+            "Format: `ubah karyawan <NIK> <field> <nilai baru>`",
+            "• `ubah karyawan 001 gaji 5jt`",
+            "• `ubah karyawan 001 hp 081234567890`",
+            "• `ubah karyawan 001 jabatan Supervisor`",
+            "• `ubah karyawan 001 departemen Produksi`",
+            "• `ubah karyawan 001 alamat Jl. Sudirman No. 5`",
+            "", "🚫 *4. STATUS KARYAWAN*",
+            "• `nonaktifkan karyawan 001` / `aktifkan karyawan 001`",
+            "", "💼 *5. PRESENSI DAN PENGGAJIAN*",
+            "• `presensi hari ini` → Ringkasan kehadiran",
+            "• `masuk 001` / `pulang 001` → Catat presensi karyawan",
+            "• `presensi 001 izin alasan` / `presensi 001 alpha 2026-10-15 keterangan`",
+            "• `rekap presensi` / `rekap presensi 001 2026-10`",
+            "• `bonus 001 500rb THR` / `potong 001 100rb kasbon`",
+            "• `slip gaji 001` → Tampilkan dan simpan slip",
+            "• `rekap gaji` → Pratinjau total gaji bulan ini",
+            "• `proses gaji 2026-10` → Proses dan simpan slip semua karyawan",
+        ]
     lines.append("━━━━━━━━━━━━━━━━━━")
     return "\n".join(lines)
 

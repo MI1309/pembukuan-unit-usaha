@@ -19,7 +19,7 @@ def setup_database():
     return {"status": "success", "message": "Setup sheets selesai. Cek terminal untuk detail."}
 
 
-# webhook
+# webhook private for Fonnte
 async def _webhook_payload(request: Request) -> dict:
     try:
         value = await request.json()
@@ -37,7 +37,7 @@ async def _webhook_payload(request: Request) -> dict:
             value[key] = item
     return value
 
-
+# Tambahkan endpoint setup untuk inisialisasi sheets
 def _first_value(payload: dict, *keys: str) -> str:
     for key in keys:
         value = payload.get(key)
@@ -45,7 +45,7 @@ def _first_value(payload: dict, *keys: str) -> str:
             return str(value).strip()
     return ""
 
-
+# route webhook 
 @router.post("/webhook")
 async def fonnte_webhook(request: Request):
     data = await _webhook_payload(request)
@@ -56,16 +56,19 @@ async def fonnte_webhook(request: Request):
 def webhook_health_check():
     return {"status": "ok", "message": "Webhook endpoint aktif"}
 
-
+# proses payload webhook
 def process_webhook_payload(data: dict) -> dict:
+    # logika untuk memproses payload webhook
     sender = ""
     message = ""
     authorized = False
     try:
+        # validasi secret
         expected_secret = str(config.WEBHOOK_SECRET or "")
         if not expected_secret or _first_value(data, "secret") != expected_secret:
             raise HTTPException(status_code=401, detail="Unauthorized")
 
+        # validasi duplikasi event
         event_id = _first_value(data, "id", "message_id", "msg_id")
         if webhook_state.is_duplicate_event(event_id):
             return {"status": "duplicate"}
@@ -79,6 +82,7 @@ def process_webhook_payload(data: dict) -> dict:
         if len(message) < 3 and not re.fullmatch(r"ya|no", message, re.I):
             return {"status": "ignored", "reason": "empty_or_short"}
 
+        # validasi rate limit
         staff = karyawan_service.is_admin(sender)
         backup_command = re.fullmatch(r"backup(?:\s+sekarang)?", message, re.I)
         if staff and backup_command:
@@ -87,6 +91,7 @@ def process_webhook_payload(data: dict) -> dict:
                 send_whatsapp(sender, "⚠️ Terlalu banyak pesan. Coba lagi dalam 1 menit.")
                 return {"status": "rate_limited"}
 
+        # proses perintah backup manual
             result = backup_service.manual_backup()
             if result["status"] == "success":
                 reply = f"✅ Backup berhasil dibuat:\n{result['name']}"

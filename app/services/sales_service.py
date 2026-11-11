@@ -21,12 +21,12 @@ MONTH_ALIASES = {
 def get_unit_sheet(produk_nama: str) -> str:
     product = produk_nama.lower()
     if "lele" in product or "ikan" in product:
-        return "Perikanan Emran"
+        return "(6)Perikanan "
     if "ayam" in product or "telur" in product:
-        return "Ternak Ayam Fazza"
+        return "(4)Ternak Ayam Fazza"
     if "anggur" in product:
-        return "Pertanian Anggur"
-    return "Pertanian Jagung"
+        return "(3)Pertanian "
+    return "(3)Pertanian "
 
 
 def _resolve_product(raw: dict) -> dict | None:
@@ -186,9 +186,9 @@ def _parse_date(value) -> date | None:
     if isinstance(value, date):
         return value
     text = str(value or "").strip()
-    for pattern in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y.%m.%d"):
+    for pattern in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y.%m.%d", "%d %b %Y", "%d %B %Y"):
         try:
-            return datetime.strptime(text[:10], pattern).date()
+            return datetime.strptime(text, pattern).date()
         except ValueError:
             continue
     return None

@@ -4,28 +4,58 @@ from app.repositories import sheet_repo
 from app.config import config
 
 def setup_sheet_unit(sheet_name):
-    """Membuat sheet unit dengan format 9 kolom (Pemasukan/Pengeluaran/Saldo)"""
+    """Create or format a unit ledger using the shared 9-column layout."""
     sheet = sheet_repo.get_sheet(sheet_name)
-    
-    # Cek jika sheet baru dibuat (kosong)
-    if not sheet.get_all_values():
-        # Baris 1: Judul
-        sheet.update('A1:I1', [[f"Kakorlap Unit Usaha {sheet_name}"]])
+    headers = [
+        'Nomor', 'Tanggal', 'Nama Barang/Jasa /Produk', 'Keterangan Transaksi',
+        'Kuantitas', 'Satuan', 'Pemasukan (Rp)', 'Pengeluaran (Rp)', 'Sisa Saldo',
+    ]
+    values = sheet.get_all_values()
+    if not values:
+        sheet.update('A1:I2', [[f"Kakorlap Unit Usaha {sheet_name}", '', '', '', '', '', '', '', ''], headers])
         sheet.merge_cells('A1:I1')
-        sheet.format('A1:I1', {'horizontalAlignment': 'CENTER', 'textFormat': {'bold': True, 'fontSize': 14}})
-        
-        # Baris 2: Header
-        headers = ['Nomor', 'Tanggal', 'Nama Barang/Jasa /Produk', 'Keterangan Transaksi', 'Kuantitas', 'Satuan (Rp)', 'Pemasukan (Rp)', 'Pengeluaran (Rp)', 'Saldo']
-        sheet.append_row(headers)
-        sheet.format('A2:I2', {'backgroundColor': {'red': 0.12, 'green': 0.22, 'blue': 0.39}, 'textFormat': {'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}, 'bold': True}})
-        
-        # Format Kolom
-        sheet.format('B:B', {'numberFormat': {'type': 'DATE', 'pattern': 'yyyy-mm-dd'}})
-        sheet.format('G:I', {'numberFormat': {'type': 'CURRENCY', 'pattern': '"Rp" #,##0'}})
-        
         print(f"✅ Sheet Unit '{sheet_name}' dibuat.")
     else:
+        title = str(values[0][0]).strip() if values[0] else ''
+        if title.lower().startswith('kakorlap unit usaha') and len(values) > 1:
+            sheet.update('A2:I2', [headers])
+        for row_number, row in enumerate(values, start=1):
+            if any(str(value).strip().lower() == 'jumlah' for value in row):
+                sheet.format(f'A{row_number}:I{row_number}', {
+                    'backgroundColor': {'red': 0.91, 'green': 0.65, 'blue': 0.0},
+                    'textFormat': {'bold': True},
+                })
         print(f"ℹ️ Sheet Unit '{sheet_name}' sudah ada.")
+
+    sheet.format('A1:I1', {
+        'backgroundColor': {'red': 0.12, 'green': 0.22, 'blue': 0.39},
+        'textFormat': {'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}, 'bold': True, 'fontSize': 14},
+        'horizontalAlignment': 'CENTER',
+        'verticalAlignment': 'MIDDLE',
+    })
+    sheet.format('A2:I2', {
+        'backgroundColor': {'red': 0.12, 'green': 0.22, 'blue': 0.39},
+        'textFormat': {'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}, 'bold': True},
+        'horizontalAlignment': 'CENTER',
+        'verticalAlignment': 'MIDDLE',
+        'wrapStrategy': 'WRAP',
+    })
+    sheet.freeze(rows=2)
+    sheet.format('B:B', {'numberFormat': {'type': 'DATE', 'pattern': 'dd mmm yyyy'}})
+    sheet.format('F:I', {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0'}})
+    widths = [110, 125, 230, 290, 115, 105, 145, 145, 145]
+    sheet.spreadsheet.batch_update({'requests': [{
+        'updateDimensionProperties': {
+            'range': {
+                'sheetId': sheet.id,
+                'dimension': 'COLUMNS',
+                'startIndex': column,
+                'endIndex': column + 1,
+            },
+            'properties': {'pixelSize': width},
+            'fields': 'pixelSize',
+        }
+    } for column, width in enumerate(widths)]})
 
 
 def _format_karyawan_sheets():

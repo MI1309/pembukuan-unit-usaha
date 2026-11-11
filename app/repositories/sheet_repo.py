@@ -91,9 +91,14 @@ def _records_from_values(values: list[list]) -> list[dict]:
     if not values:
         return []
 
+    title = str(values[0][0]).strip().lower() if values[0] else ""
+    header_row = 1 if title.startswith("kakorlap unit usaha") and len(values) > 1 else 0
+    if header_row >= len(values):
+        return []
+
     headers = []
     used_headers = set()
-    for column, value in enumerate(values[0], start=1):
+    for column, value in enumerate(values[header_row], start=1):
         base = str(value).strip() or f"Column_{column}"
         header = base
         suffix = 2
@@ -104,7 +109,7 @@ def _records_from_values(values: list[list]) -> list[dict]:
         used_headers.add(header)
 
     records = []
-    for row in values[1:]:
+    for row in values[header_row + 1:]:
         if not any(str(value).strip() for value in row):
             continue
         records.append({

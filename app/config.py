@@ -70,14 +70,11 @@ class Config:
     
     # Daftar Unit Usaha (Sesuaikan dengan tab di Spreadsheet kamu)
     UNIT_USAHA = [
-        "Perikanan Emran",
-        "Ternak Ayam Fazza",
-        "Ternak Ayam Emran",
-        "Pertanian Anggur",
-        "Pertanian Jagung",
-        "Pertanian Padi",
-        "Pertanian Melon",
-        "Pabrik Pupuk"
+        "(3)Pertanian ",
+        "(4)Ternak Ayam Fazza",
+        "(5)Ternak Ayam Emran",
+        "(6)Perikanan ",
+        "(7)Pabrik Pupuk",
     ]
 
 config = Config()

@@ -61,6 +61,9 @@ def application(environ, start_response):
     if method in {"GET", "HEAD"} and path in {"/", "/health"}:
         return _response(start_response, "200 OK", {"status": "ok", "message": "Bot Agrinova Aktif"})
 
+    if method in {"GET", "HEAD"} and path == "/webhook":
+        return _response(start_response, "200 OK", {"status": "ok", "message": "Webhook endpoint aktif"})
+
     if method == "GET" and path == "/setup":
         try:
             init_all_sheets()

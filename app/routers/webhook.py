@@ -48,6 +48,11 @@ async def fonnte_webhook(request: Request):
     return process_webhook_payload(data)
 
 
+@router.get("/webhook")
+def webhook_health_check():
+    return {"status": "ok", "message": "Webhook endpoint aktif"}
+
+
 def process_webhook_payload(data: dict) -> dict:
     sender = ""
     message = ""

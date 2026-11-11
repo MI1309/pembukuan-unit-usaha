@@ -1,4 +1,5 @@
 import re
+from datetime import date
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from threading import RLock
@@ -76,11 +77,15 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
         if not worksheet:
             raise ValueError(f"Worksheet not found: {sheet_name}")
         request_rows = []
+        date_columns = set()
         for values in rows:
             cells = []
-            for value in values:
+            for column, value in enumerate(values):
                 if isinstance(value, bool):
                     cell_value = {"boolValue": value}
+                elif isinstance(value, date):
+                    cell_value = {"numberValue": (value - date(1899, 12, 30)).days}
+                    date_columns.add(column)
                 elif isinstance(value, (int, float)):
                     cell_value = {"numberValue": value}
                 else:
@@ -94,6 +99,20 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
                 "fields": "userEnteredValue",
             }
         })
+        for column in date_columns:
+            requests.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": worksheet.id,
+                        "startColumnIndex": column,
+                        "endColumnIndex": column + 1,
+                    },
+                    "cell": {"userEnteredFormat": {"numberFormat": {
+                        "type": "DATE", "pattern": "dd mmm yyyy",
+                    }}},
+                    "fields": "userEnteredFormat.numberFormat",
+                }
+            })
 
     spreadsheet.batch_update({"requests": requests})
     for sheet_name in rows_by_name:

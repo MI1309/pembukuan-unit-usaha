@@ -151,15 +151,14 @@ def _save_sale(sale: dict) -> str:
     income = sale["penjualan"] if is_sale else ""
     expense = "" if is_sale else sale["penjualan"]
     balance_change = sale["penjualan"] if is_sale else -sale["penjualan"]
-    date_text = _format_sheet_date(sale["tanggal"])
     quantity_text = f"{sale['kuantitas']:g} {sale['unit_kuantitas']}".strip()
     unit_row = [
-        "", date_text, sale["produk"],
+        "", sale["tanggal"], sale["produk"],
         sale["keterangan"], quantity_text, sale["satuan"],
         income, expense, balance_change,
     ]
     daily_detail_row = [
-        date_text, sale["produk"], sale["keterangan"],
+        sale["tanggal"], sale["produk"], sale["keterangan"],
         quantity_text, sale["satuan"], income, expense,
     ]
     sheet_repo.append_rows_atomically([
@@ -167,11 +166,6 @@ def _save_sale(sale: dict) -> str:
         ("(2)Rincian Transaksi Harian", daily_detail_row),
     ])
     return None
-
-
-def _format_sheet_date(value: date) -> str:
-    month_names = ("Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des")
-    return f"{value.day} {month_names[value.month - 1]} {value.year}"
 
 
 def _confirm_text(sale: dict) -> str:

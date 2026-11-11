@@ -156,6 +156,16 @@ def create_backup_copy(folder_id: str | None = None) -> dict:
     return {"id": copied.get("id"), "name": copied.get("name", copy_name)}
 
 
+def manual_backup() -> dict:
+    if not config.BACKUP_ENABLED:
+        return {"status": "disabled"}
+    try:
+        copied = create_backup_copy()
+        return {"status": "success", "name": copied["name"]}
+    except Exception as error:
+        return {"status": "error", "error": str(error)}
+
+
 def daily_backup() -> dict:
     if not config.BACKUP_ENABLED:
         return {"status": "disabled"}

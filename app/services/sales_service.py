@@ -435,6 +435,7 @@ def handle_help_command(message: str) -> str | None:
         "• `rekap tahun ini` / `rekap tahun lalu` / `rekap 2026`\n"
         "• `rekap jan` → Januari tahun ini; `rekap 2026-10` / `rekap oktober 2026` / `rekap okt 2026`\n"
         "• `rekap 15 okt` / `rekap 15-10-2026`\n\n"
+        "🗄️ Admin: ketik `backup` untuk membuat salinan spreadsheet sekarang.\n\n"
         f"⚠️ Transaksi ≥ {format_rupiah(config.CONFIRM_THRESHOLD)} meminta konfirmasi `YA` / `BATAL`.\n\n"
         "👥 *3. FITUR KARYAWAN*\nKetik `help karyawan` untuk panduan karyawan, presensi, dan penggajian.\n"
         "━━━━━━━━━━━━━━━━━━"

@@ -6,6 +6,7 @@ from app.config import config
 from app.core.whatsapp import send_whatsapp
 from app.services import sales_service
 from app.services import karyawan_service, payroll_service
+from app.services import backup_service
 from app.services import webhook_state
 from app.services.setup_service import init_all_sheets # Import fungsi di atas
 
@@ -104,6 +105,27 @@ def process_webhook_payload(data: dict) -> dict:
             send_whatsapp(sender, "Perintah tidak dikenali. Ketik *help karyawan*.")
             webhook_state.log_event(sender, message, "IGNORED_NON_STAFF")
             return {"status": "ignored_non_staff"}
+
+        if re.fullmatch(r"backup(?:\s+sekarang)?", message, re.I):
+            result = backup_service.manual_backup()
+            if result["status"] == "success":
+                reply = f"✅ Backup berhasil dibuat:\n{result['name']}"
+                status = "BACKUP_MANUAL_OK"
+            elif result["status"] == "disabled":
+                reply = "⚠️ Fitur backup sedang dinonaktifkan."
+                status = "BACKUP_MANUAL_DISABLED"
+            else:
+                reply = "❌ Backup gagal dibuat. Periksa log aplikasi atau konfigurasi Google Drive."
+                status = "BACKUP_MANUAL_FAIL"
+            send_whatsapp(sender, reply)
+            webhook_state.log_event(
+                sender,
+                message,
+                status,
+                invoice=result.get("name", ""),
+                error=result.get("error", ""),
+            )
+            return {"status": "backup", "result": result["status"]}
 
         help_reply = sales_service.handle_help_command(message)
         if help_reply is not None:

@@ -111,6 +111,32 @@ def _daily_period_label(month_date: date) -> str:
     return f"Periode: {month_start:%d %b %Y} s/d {month_end:%d %b %Y} Semua Unit Usaha"
 
 
+def _unit_rows_before_month(rows: list[list], target_month: date) -> list[tuple[int, list]]:
+    archived = []
+    target_key = (target_month.year, target_month.month)
+    for row_number, row in enumerate(rows[2:], start=3):
+        row_date = _parse_date(row[1] if len(row) > 1 else "")
+        if row_date and (row_date.year, row_date.month) < target_key:
+            archived.append((row_number, row))
+    return archived
+
+
+def _maybe_archive_unit_transactions(sale_date: date) -> None:
+    rows_by_unit = {}
+    for unit in config.UNIT_USAHA:
+        sheet = sheet_repo.get_sheet(unit, create=False)
+        if not sheet:
+            continue
+        rows = _unit_rows_before_month(sheet.get_all_values(), sale_date)
+        if rows:
+            rows_by_unit[unit] = rows
+    if rows_by_unit:
+        sheet_repo.archive_unit_transactions(
+            rows_by_unit,
+            now_tz().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+
 def _maybe_archive_daily_detail(sale_date: date) -> None:
     sheet = sheet_repo.get_sheet("(2)Rincian Transaksi Harian", create=False)
     if not sheet:
@@ -190,6 +216,7 @@ def process_sales(message: str, confirmed: bool = False) -> tuple[bool, str, dic
     saved = []
     with _SALES_LOCK:
         try:
+            _maybe_archive_unit_transactions(prepared[0]["tanggal"])
             _maybe_archive_daily_detail(prepared[0]["tanggal"])
             rows = [row for sale in prepared for row in _save_sale(sale)]
             sheet_repo.append_rows_atomically(rows)

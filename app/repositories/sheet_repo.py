@@ -65,6 +65,36 @@ def append_row(sheet_name: str, row: list):
     invalidate_cache(sheet_name)
 
 
+def _appended_cell_format(sheet_name: str, column: int) -> dict:
+    cell_format = {
+        "backgroundColor": {"red": 0.97, "green": 0.98, "blue": 1.0},
+        "verticalAlignment": "MIDDLE",
+        "wrapStrategy": "WRAP",
+        "horizontalAlignment": "LEFT",
+        "borders": {
+            "bottom": {
+                "style": "SOLID",
+                "color": {"red": 0.86, "green": 0.89, "blue": 0.92},
+            }
+        },
+    }
+    if sheet_name == "(2)Rincian Transaksi Harian":
+        if column == 0:
+            cell_format["numberFormat"] = {"type": "DATE", "pattern": "dd mmm yyyy"}
+            cell_format["horizontalAlignment"] = "CENTER"
+        elif column in {4, 5, 6}:
+            cell_format["numberFormat"] = {"type": "CURRENCY", "pattern": '"Rp" #,##0'}
+            cell_format["horizontalAlignment"] = "RIGHT"
+    elif sheet_name.startswith(("(3)", "(4)", "(5)", "(6)", "(7)")):
+        if column == 1:
+            cell_format["numberFormat"] = {"type": "DATE", "pattern": "dd mmm yyyy"}
+            cell_format["horizontalAlignment"] = "CENTER"
+        elif column in {5, 6, 7, 8}:
+            cell_format["numberFormat"] = {"type": "CURRENCY", "pattern": '"Rp" #,##0'}
+            cell_format["horizontalAlignment"] = "RIGHT"
+    return cell_format
+
+
 def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
     spreadsheet = get_spreadsheet()
     requests = []
@@ -90,13 +120,16 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
                     cell_value = {"numberValue": value}
                 else:
                     cell_value = {"stringValue": str(value or "")}
-                cells.append({"userEnteredValue": cell_value})
+                cells.append({
+                    "userEnteredValue": cell_value,
+                    "userEnteredFormat": _appended_cell_format(sheet_name, column),
+                })
             request_rows.append({"values": cells})
         requests.append({
             "appendCells": {
                 "sheetId": worksheet.id,
                 "rows": request_rows,
-                "fields": "userEnteredValue",
+                "fields": "userEnteredValue,userEnteredFormat",
             }
         })
         for column in date_columns:

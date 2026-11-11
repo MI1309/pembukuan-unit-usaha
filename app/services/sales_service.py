@@ -145,7 +145,8 @@ def _maybe_archive_daily_detail(sale_date: date) -> None:
         return
 
 
-def _sale_rows(sale: dict) -> list[tuple[str, list]]:
+def _save_sale(sale: dict) -> str:
+    _maybe_archive_daily_detail(sale["tanggal"])
     is_sale = sale.get("is_penjualan", True)
     income = sale["penjualan"] if is_sale else ""
     expense = "" if is_sale else sale["penjualan"]
@@ -161,10 +162,11 @@ def _sale_rows(sale: dict) -> list[tuple[str, list]]:
         date_text, sale["produk"], sale["keterangan"],
         quantity_text, sale["satuan"], income, expense,
     ]
-    return [
+    sheet_repo.append_rows_atomically([
         (sale["unit"], unit_row),
         ("(2)Rincian Transaksi Harian", daily_detail_row),
-    ]
+    ])
+    return None
 
 
 def _format_sheet_date(value: date) -> str:
@@ -201,21 +203,12 @@ def process_sales(message: str, confirmed: bool = False) -> tuple[bool, str, dic
 
     saved = []
     with _SALES_LOCK:
-        groups = []
         for sale in prepared:
-            month_key = (sale["tanggal"].year, sale["tanggal"].month)
-            if not groups or groups[-1][0] != month_key:
-                groups.append((month_key, []))
-            groups[-1][1].append(sale)
-
-        for _, sales_group in groups:
             try:
-                _maybe_archive_daily_detail(sales_group[0]["tanggal"])
-                rows = [row for sale in sales_group for row in _sale_rows(sale)]
-                sheet_repo.append_rows_atomically(rows)
-                saved.extend(sales_group)
+                _save_sale(sale)
+                saved.append(sale)
             except Exception as error:
-                failed.extend(f"{sale['produk']} — {error}" for sale in sales_group)
+                failed.append(f"{sale['produk']} — {error}")
 
     lines = []
     if saved:
@@ -473,7 +466,14 @@ def _year_report(target: date, rows: list[dict]) -> str:
 
 
 def process_rekap(message: str) -> str | None:
-    if not re.search(r"\brekap\b", message, re.I):
+    has_recap_keyword = re.search(r"\brekap\b", message, re.I)
+    asks_weekly_totals = re.search(
+        r"\b(?:pemasukan|pemasukkan|pengeluaran)\b.*\bminggu(?:an)?\b"
+        r"|\bminggu(?:an)?\b.*\b(?:pemasukan|pemasukkan|pengeluaran)\b",
+        message,
+        re.I,
+    )
+    if not has_recap_keyword and not asks_weekly_totals:
         return None
     period_type, target = _period_from_message(message)
     if period_type == "week":

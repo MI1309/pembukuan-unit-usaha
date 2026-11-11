@@ -106,7 +106,7 @@ def analyze_sales(message: str) -> dict:
             {"role": "user", "content": message},
         ],
         "temperature": 0.1,
-        "max_tokens": 900,
+        "max_tokens": 6000,
         "response_format": {"type": "json_object"},
     }
     last_error = None
@@ -125,7 +125,10 @@ def analyze_sales(message: str) -> dict:
             if response.status_code < 200 or response.status_code >= 300:
                 raise RuntimeError(f"Groq API error {response.status_code}: {response.text[:500]}")
             body = response.json()
-            content = body["choices"][0]["message"]["content"]
+            choice = body["choices"][0]
+            if choice.get("finish_reason") == "length":
+                raise RuntimeError("Respons Groq terpotong. Kurangi jumlah transaksi atau kirim dalam beberapa pesan.")
+            content = choice["message"]["content"]
             parsed = json.loads(_extract_json(content))
             if isinstance(parsed, dict) and isinstance(parsed.get("transaksi"), list):
                 return parsed

@@ -25,7 +25,7 @@ class Config:
     
     # Aturan Bisnis
     TIMEZONE = "Asia/Jakarta"
-    COMPANY = "PT Lentera Agrinova Organik"
+    COMPANY = "Industri Pertanian Terpadu Lentera Farm"
     ALLOWED_SENDERS = ['6285230495385', '6281803447100', '6289514366445']
     ADMIN_SENDERS = [] # Kosongkan jika sama dengan ALLOWED_SENDERS
     ADMIN_NOTIFY = '6289514366445'  # Nomor WA untuk notifikasi admin (opsional)

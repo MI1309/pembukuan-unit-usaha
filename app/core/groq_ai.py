@@ -36,14 +36,14 @@ def _sales_prompt(today: str) -> str:
         f"4. Untuk penjualan, katalog valid hanya: {products}. Produk lain tetap keluarkan agar ditolak aplikasi.\n"
         "5. Pembelian boleh berupa barang/jasa apa pun, termasuk Listrik, UHK, Penyusutan, Konsumsi Dapur, dan PDAM. "
         f"Set is_penjualan=false dan isi unit_usaha dengan nama tab persis dari daftar ini: {units}.\n"
-        "6. Setiap transaksi wajib berisi produk/jasa, keterangan transaksi, kuantitas, satuan, dan total atau harga satuan. "
+        "6. Setiap transaksi wajib berisi produk/jasa, keterangan transaksi, kuantitas, satuan, dan harga_satuan. "
         "Jangan mengarang kuantitas atau satuan; jika tidak disebut isi kuantitas 0 dan satuan kosong agar aplikasi meminta koreksi.\n"
         "7. Jangan menebak unit pembelian. Jika pesan tidak menyebut unit dengan jelas, isi unit_usaha kosong.\n"
         "8. kuantitas adalah jumlah barang/jasa, bukan harga. Satuan huruf besar sesuai pesan/katalog.\n"
         "9. Angka keluaran berupa number polos. Titik ribuan diabaikan; koma desimal. Contoh 1.400.000=1400000, "
         "2,5 jt=2500000, 2,3 ribu=2300. rb/ribu/k dikali 1000; jt/juta dikali 1000000.\n"
-        "10. Isi total_harga hanya jika disebut sebagai jumlah total. Isi harga_satuan hanya jika harga per item/kg/ekor/@ disebut. "
-        "Jangan mengisi keduanya dan jangan menghitung perkalian sendiri.\n"
+        "10. Jika total_harga disebut, tetap simpan sebagai harga total; namun cara baru yang diutamakan adalah harga_satuan per unit. "
+        "Sistem akan menghitung total = kuantitas × harga_satuan secara otomatis.\n"
         "11. Keterangan transaksi harus mengikuti pesan; tanggal gunakan YYYY-MM-DD dan default hari ini.\n"
         "12. Jangan berikan reasoning, tag thinking, atau teks di luar JSON."
     )
@@ -53,7 +53,47 @@ def _retryable_status(status: int) -> bool:
     return status == 429 or status >= 500
 
 
+def _parse_pipe_transactions(message: str) -> dict | None:
+    transactions = []
+    for line in message.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = [field.strip() for field in line.split("|")]
+        if len(fields) not in {4, 5}:
+            return None
+        action, description, quantity_text, price_text = fields[:4]
+        action_match = re.match(r"^(penj|penjualan|jual|pemb|pembelian|beli)\s+(.+)$", action, re.I)
+        quantity_match = re.fullmatch(r"([\d.,]+)\s+(.+)", quantity_text)
+        price_match = re.fullmatch(r"[\d.,]+", price_text)
+        if not action_match or not quantity_match or not price_match:
+            return None
+        action_type, product = action_match.groups()
+        quantity, unit = quantity_match.groups()
+        is_sale = action_type.lower() in {"penj", "penjualan", "jual"}
+        business_unit = ""
+        if len(fields) == 5:
+            unit_match = re.fullmatch(r"unit\s+(.+)", fields[4], re.I)
+            if not unit_match:
+                return None
+            business_unit = unit_match.group(1).strip()
+        transactions.append({
+            "produk": product,
+            "keterangan": description,
+            "kuantitas": quantity.replace(".", "").replace(",", "."),
+            "satuan": unit,
+            "total_harga": price_text.replace(".", "").replace(",", ""),
+            "harga_satuan": None,
+            "is_penjualan": is_sale,
+            "unit_usaha": "" if is_sale else business_unit,
+        })
+    return {"transaksi": transactions} if transactions else None
+
+
 def analyze_sales(message: str) -> dict:
+    pipe_transactions = _parse_pipe_transactions(message)
+    if pipe_transactions:
+        return pipe_transactions
     if not config.GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY belum diisi.")
     today = now_tz().strftime("%Y-%m-%d")

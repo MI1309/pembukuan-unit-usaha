@@ -77,11 +77,15 @@ def _normalise_sale(raw: dict) -> tuple[dict | None, str | None]:
     raw_total = parse_amount(raw.get("total_harga"))
     purchase_unit = str(raw.get("satuan") or "").strip()
     if quantity > 0 and raw_total > 0 and quantity == raw_total:
-        return None, f"{product_name} {format_rupiah(raw_total)} — jumlah tertukar dengan harga; kirim kuantitas dan harga dengan jelas"
+        total = raw_total
     if not total and unit_price and quantity:
         total = round(unit_price * quantity)
     if not is_sale and (quantity <= 0 or not purchase_unit):
         return None, f"{product_name} — pembelian wajib mencantumkan kuantitas dan satuan"
+    if not total and not unit_price:
+        return None, f"{product_name} — harga satuan atau total harus dicantumkan"
+    if not total and unit_price and quantity:
+        total = round(unit_price * quantity)
     if total <= 0 or quantity <= 0:
         return None, f"{product_name} — jumlah/harga salah"
     if quantity >= 1_000_000 or (is_sale and quantity >= total):
@@ -184,12 +188,13 @@ def _save_sale(sale: dict) -> str:
     invoice = _next_invoice(sale["tanggal"])
     _maybe_archive_daily_detail(sale["tanggal"])
     is_sale = sale.get("is_penjualan", True)
-    income = sale["penjualan"] if is_sale else 0
-    expense = 0 if is_sale else sale["penjualan"]
+    income = sale["penjualan"] if is_sale else ""
+    expense = "" if is_sale else sale["penjualan"]
+    balance_change = sale["penjualan"] if is_sale else -sale["penjualan"]
     unit_row = [
         invoice, sale["tanggal"].strftime("%Y-%m-%d"), sale["produk"],
         sale["keterangan"], sale["kuantitas"], sale["satuan"],
-        income, expense, income - expense,
+        income, expense, balance_change,
     ]
     unit_label = re.sub(r"^\(\d+\)\s*", "", sale["unit"]).strip()
     detail_description = f"Unit: {unit_label} | Invoice: {invoice} | {sale['keterangan']}"

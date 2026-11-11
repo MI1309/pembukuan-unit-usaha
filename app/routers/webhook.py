@@ -12,12 +12,14 @@ from app.services.setup_service import init_all_sheets # Import fungsi di atas
 
 router = APIRouter()
 
+# setup
 @router.get("/setup")
 def setup_database():
     init_all_sheets()
     return {"status": "success", "message": "Setup sheets selesai. Cek terminal untuk detail."}
 
 
+# webhook
 async def _webhook_payload(request: Request) -> dict:
     try:
         value = await request.json()
@@ -78,6 +80,35 @@ def process_webhook_payload(data: dict) -> dict:
             return {"status": "ignored", "reason": "empty_or_short"}
 
         staff = karyawan_service.is_admin(sender)
+        backup_command = re.fullmatch(r"backup(?:\s+sekarang)?", message, re.I)
+        if staff and backup_command:
+            authorized = True
+            if webhook_state.is_rate_limited(sender):
+                send_whatsapp(sender, "⚠️ Terlalu banyak pesan. Coba lagi dalam 1 menit.")
+                return {"status": "rate_limited"}
+
+            result = backup_service.manual_backup()
+            if result["status"] == "success":
+                reply = f"✅ Backup berhasil dibuat:\n{result['name']}"
+                status = "BACKUP_MANUAL_OK"
+            elif result["status"] == "disabled":
+                reply = "⚠️ Fitur backup sedang dinonaktifkan."
+                status = "BACKUP_MANUAL_DISABLED"
+            else:
+                reply = "❌ Backup gagal dibuat. Periksa log aplikasi atau konfigurasi Google Drive."
+                status = "BACKUP_MANUAL_FAIL"
+            sent = send_whatsapp(sender, reply)
+            if not sent:
+                status = "BACKUP_MANUAL_REPLY_FAILED"
+            webhook_state.log_event(
+                sender,
+                message,
+                status,
+                invoice=result.get("name", ""),
+                error=result.get("error", "") if sent else "fonnte_send_failed",
+            )
+            return {"status": "backup", "result": result["status"], "reply_sent": sent}
+
         employee = karyawan_service.get_karyawan_by_phone(sender, active_only=False)
         if not staff and not employee:
             webhook_state.log_event(sender, message, "BLOCKED_NOT_ALLOWED", error="sender_not_allowed")
@@ -102,30 +133,10 @@ def process_webhook_payload(data: dict) -> dict:
             return {"status": "payroll"}
 
         if not staff:
-            send_whatsapp(sender, "Perintah tidak dikenali. Ketik *help karyawan*.")
-            webhook_state.log_event(sender, message, "IGNORED_NON_STAFF")
-            return {"status": "ignored_non_staff"}
-
-        if re.fullmatch(r"backup(?:\s+sekarang)?", message, re.I):
-            result = backup_service.manual_backup()
-            if result["status"] == "success":
-                reply = f"✅ Backup berhasil dibuat:\n{result['name']}"
-                status = "BACKUP_MANUAL_OK"
-            elif result["status"] == "disabled":
-                reply = "⚠️ Fitur backup sedang dinonaktifkan."
-                status = "BACKUP_MANUAL_DISABLED"
-            else:
-                reply = "❌ Backup gagal dibuat. Periksa log aplikasi atau konfigurasi Google Drive."
-                status = "BACKUP_MANUAL_FAIL"
+            reply = karyawan_service.MSG_ADMIN_ONLY if backup_command else "Perintah tidak dikenali. Ketik *help karyawan*."
             send_whatsapp(sender, reply)
-            webhook_state.log_event(
-                sender,
-                message,
-                status,
-                invoice=result.get("name", ""),
-                error=result.get("error", ""),
-            )
-            return {"status": "backup", "result": result["status"]}
+            webhook_state.log_event(sender, message, "ADMIN_ONLY" if backup_command else "IGNORED_NON_STAFF")
+            return {"status": "ignored_non_staff"}
 
         help_reply = sales_service.handle_help_command(message)
         if help_reply is not None:

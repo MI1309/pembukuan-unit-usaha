@@ -139,8 +139,7 @@ def _maybe_archive_daily_detail(sale_date: date) -> None:
         return
 
 
-def _save_sale(sale: dict) -> str:
-    _maybe_archive_daily_detail(sale["tanggal"])
+def _save_sale(sale: dict) -> list[tuple[str, list]]:
     is_sale = sale.get("is_penjualan", True)
     income = sale["penjualan"] if is_sale else ""
     expense = "" if is_sale else sale["penjualan"]
@@ -155,11 +154,10 @@ def _save_sale(sale: dict) -> str:
         sale["tanggal"], sale["produk"], sale["keterangan"],
         quantity_text, sale["satuan"], income, expense,
     ]
-    sheet_repo.append_rows_atomically([
+    return [
         (sale["unit"], unit_row),
         ("(2)Rincian Transaksi Harian", daily_detail_row),
-    ])
-    return None
+    ]
 
 
 def _confirm_text(sale: dict) -> str:
@@ -191,12 +189,13 @@ def process_sales(message: str, confirmed: bool = False) -> tuple[bool, str, dic
 
     saved = []
     with _SALES_LOCK:
-        for sale in prepared:
-            try:
-                _save_sale(sale)
-                saved.append(sale)
-            except Exception as error:
-                failed.append(f"{sale['produk']} — {error}")
+        try:
+            _maybe_archive_daily_detail(prepared[0]["tanggal"])
+            rows = [row for sale in prepared for row in _save_sale(sale)]
+            sheet_repo.append_rows_atomically(rows)
+            saved.extend(prepared)
+        except Exception as error:
+            failed.extend(f"{sale['produk']} — {error}" for sale in prepared)
 
     lines = []
     if saved:

@@ -1,36 +1,94 @@
-import requests
 import json
+import re
+import time
+
+import requests
+
 from app.config import config
 from app.core.utils import now_tz
 
-def analyze_sales(message: str) -> dict:
-    today = now_tz().strftime("%Y-%m-%d")
-    
-    # PROMPT DIPERPENDEK (Hanya instruksi esensial)
-    prompt = f"""Ekstrak pesan jadi JSON: {{"transaksi":[{{"produk":"","keterangan":"","kuantitas":0,"satuan":"","total_harga":0,"tanggal":"{today}"}}]}}. 
-Aturan: Angka polos (rb=x1000, jt=x1000000). Jika bukan jualan, balas {{"transaksi":[]}}."""
 
+def _extract_json(content: str) -> str:
+    raw = re.sub(r"<think>[\s\S]*?</think>", "", str(content or ""), flags=re.I).strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("JSON tidak ditemukan pada respons Groq.")
+    return raw[start:end + 1]
+
+
+def _sales_prompt(today: str) -> str:
+    products = "; ".join(
+        f"{item['nama']} (kata kunci: {', '.join(item['kunci'])}; satuan: {item['satuan']})"
+        for item in config.KATALOG
+    )
+    return (
+        "Kamu adalah asisten admin pencatatan penjualan PT Lentera Agrinova Organik.\n"
+        f"Tanggal hari ini: {today}.\n"
+        "Ekstrak SEMUA transaksi dalam pesan, satu objek per barang/baris, menjadi JSON valid tanpa markdown.\n"
+        'Format: {"transaksi":[{"produk":"","keterangan":"","kuantitas":0,"satuan":"",'
+        '"total_harga":null,"harga_satuan":null,"tanggal":"YYYY-MM-DD","is_penjualan":true}]}\n'
+        "Aturan ketat:\n"
+        "1. Jika bukan penjualan barang (rekap, salam, pertanyaan), keluarkan {\"transaksi\":[]} .\n"
+        "2. Jangan lewatkan atau gabungkan transaksi berbeda.\n"
+        f"3. Katalog valid hanya: {products}. Produk lain tetap keluarkan agar ditolak aplikasi; jangan mengarang kecocokan.\n"
+        "4. kuantitas adalah jumlah barang, bukan harga. Satuan huruf besar: KG, EKOR, BUTIR, PCS sesuai katalog.\n"
+        "5. Angka keluaran berupa number polos. Titik ribuan diabaikan; koma desimal. Contoh 1.400.000=1400000, "
+        "2,5 jt=2500000, 2,3 ribu=2300. rb/ribu/k dikali 1000; jt/juta dikali 1000000.\n"
+        "6. Isi total_harga hanya jika disebut sebagai jumlah total. Isi harga_satuan hanya jika harga per item/kg/ekor/@ disebut. "
+        "Jangan mengisi keduanya dan jangan menghitung perkalian sendiri.\n"
+        "7. Keterangan singkat mengikuti pesan; tanggal gunakan YYYY-MM-DD dan default hari ini.\n"
+        "8. Jangan berikan reasoning, tag thinking, atau teks di luar JSON."
+    )
+
+
+def _retryable_status(status: int) -> bool:
+    return status == 429 or status >= 500
+
+
+def analyze_sales(message: str) -> dict:
+    if not config.GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY belum diisi.")
+    today = now_tz().strftime("%Y-%m-%d")
     payload = {
         "model": config.GROQ_MODEL,
         "messages": [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": message}
+            {"role": "system", "content": _sales_prompt(today)},
+            {"role": "user", "content": message},
         ],
         "temperature": 0.1,
-        "max_tokens": 500, # <--- DIBATASI AGAR TIDAK MELEBIHI KUOTA
-        "response_format": {"type": "json_object"}
+        "max_tokens": 900,
+        "response_format": {"type": "json_object"},
     }
-    
-    try:
-        res = requests.post(config.GROQ_URL, headers={"Authorization": f"Bearer {config.GROQ_API_KEY}"}, json=payload, timeout=15)
-        
-        # --- HAPUS 2 BARIS PRINT INI JIKA SUDAH BERHASIL ---
-        print("STATUS CODE:", res.status_code)
-        print("RESPON GROQ:", res.text) 
-        # ---------------------------------------------------
-
-        content = res.json()["choices"][0]["message"]["content"]
-        return json.loads(content)
-    except Exception as e:
-        print(f"Groq Error: {e}")
-        return {"transaksi": []}
+    last_error = None
+    for attempt in range(2):
+        try:
+            response = requests.post(
+                config.GROQ_URL,
+                headers={"Authorization": f"Bearer {config.GROQ_API_KEY}"},
+                json=payload,
+                timeout=20,
+            )
+            if _retryable_status(response.status_code) and attempt == 0:
+                last_error = RuntimeError(f"Groq API error {response.status_code}: {response.text[:300]}")
+                time.sleep(1.5)
+                continue
+            if response.status_code < 200 or response.status_code >= 300:
+                raise RuntimeError(f"Groq API error {response.status_code}: {response.text[:500]}")
+            body = response.json()
+            content = body["choices"][0]["message"]["content"]
+            parsed = json.loads(_extract_json(content))
+            if isinstance(parsed, dict) and isinstance(parsed.get("transaksi"), list):
+                return parsed
+            if isinstance(parsed, list):
+                return {"transaksi": parsed}
+            if isinstance(parsed, dict) and parsed.get("produk"):
+                return {"transaksi": [parsed]}
+            raise ValueError("Struktur JSON respons Groq tidak sesuai.")
+        except (requests.Timeout, requests.ConnectionError) as error:
+            last_error = error
+            if attempt == 0:
+                time.sleep(1.5)
+                continue
+            raise RuntimeError(f"Groq tidak dapat dijangkau: {error}") from error
+    raise last_error or RuntimeError("Groq gagal setelah retry.")

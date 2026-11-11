@@ -3,6 +3,8 @@
 # ==========================================
 .env
 credentials.json
+oauth_client.json
+drive_token.json
 *.pem
 *.key
 

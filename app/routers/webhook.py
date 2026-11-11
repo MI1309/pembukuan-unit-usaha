@@ -57,6 +57,7 @@ def webhook_health_check():
 def process_webhook_payload(data: dict) -> dict:
     sender = ""
     message = ""
+    authorized = False
     try:
         expected_secret = str(config.WEBHOOK_SECRET or "")
         if not expected_secret or _first_value(data, "secret") != expected_secret:
@@ -80,6 +81,7 @@ def process_webhook_payload(data: dict) -> dict:
         if not staff and not employee:
             webhook_state.log_event(sender, message, "BLOCKED_NOT_ALLOWED", error="sender_not_allowed")
             return {"status": "blocked", "error": "sender_not_allowed"}
+        authorized = True
 
         if webhook_state.is_rate_limited(sender):
             webhook_state.log_event(sender, message, "RATE_LIMITED", error="too_many_requests")
@@ -151,7 +153,6 @@ def process_webhook_payload(data: dict) -> dict:
         raise
     except Exception as error:
         webhook_state.log_event(sender, message, "ERROR", error=str(error))
-        employee = karyawan_service.get_karyawan_by_phone(sender, active_only=False) if sender else None
-        if sender and (karyawan_service.is_admin(sender) or employee):
-            send_whatsapp(sender, f"❌ Gagal memproses pesan: {error}\nSilakan kirim ulang.")
-        return {"status": "error", "error": str(error)}
+        if authorized and sender:
+            send_whatsapp(sender, "❌ Sistem sedang mengalami gangguan sementara. Silakan coba lagi beberapa menit.")
+        return {"status": "error", "message": "temporary_processing_error"}

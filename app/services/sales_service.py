@@ -102,11 +102,12 @@ def _next_invoice(sale_date: date) -> str:
             counter = parse_amount(record.get("Value", 0))
             break
     if not counter:
-        for unit in config.UNIT_USAHA:
-            for record in sheet_repo.get_all_records(unit):
-                match = re.search(r"INV/(\d+)\s*$", str(record.get("Nomor", "")))
-                if match:
-                    counter = max(counter, int(match.group(1)))
+            records_by_unit = sheet_repo.get_all_records_many(config.UNIT_USAHA)
+            for records in records_by_unit.values():
+                for record in records:
+                    match = re.search(r"INV/(\d+)\s*$", str(record.get("Nomor", "")))
+                    if match:
+                        counter = max(counter, int(match.group(1)))
     if counter_row is None:
         counter_row = len(meta) + 2
     counter += 1
@@ -195,8 +196,9 @@ def _parse_date(value) -> date | None:
 
 def _sales_rows() -> list[dict]:
     sales = []
-    for unit in config.UNIT_USAHA:
-        for row in sheet_repo.get_all_records(unit):
+    records_by_unit = sheet_repo.get_all_records_many(config.UNIT_USAHA)
+    for unit, records in records_by_unit.items():
+        for row in records:
             sale_date = _parse_date(row.get("Tanggal"))
             if not sale_date:
                 continue
@@ -426,7 +428,7 @@ def handle_help_command(message: str) -> str | None:
         "• `rekap` → hari ini; `rekap kemarin` → kemarin\n"
         "• `rekap bulan ini` / `rekap bulan lalu`\n"
         "• `rekap tahun ini` / `rekap tahun lalu` / `rekap 2026`\n"
-        "• `rekap 2026-10` / `rekap oktober 2026`\n"
+        "• `rekap 2026-10` / `rekap oktober 2026` / `rekap okt 2026`\n"
         "• `rekap 15 okt` / `rekap 15-10-2026`\n\n"
         f"⚠️ Transaksi ≥ {format_rupiah(config.CONFIRM_THRESHOLD)} meminta konfirmasi `YA` / `BATAL`.\n\n"
         "👥 *3. FITUR KARYAWAN*\nKetik `help karyawan` untuk panduan karyawan, presensi, dan penggajian.\n"

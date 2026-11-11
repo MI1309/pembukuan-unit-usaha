@@ -16,6 +16,8 @@ PENDING_HEADERS = ["Sender", "Message", "ExpiresAt"]
 _STATE_LOCK = RLock()
 _SEEN_EVENTS: dict[str, datetime] = {}
 _RATE_BUCKETS: dict[str, tuple[int, int]] = {}
+_PENDING_HEADERS_READY = False
+_LOG_HEADERS_READY = False
 
 
 def _digits(value: str) -> str:
@@ -24,9 +26,14 @@ def _digits(value: str) -> str:
 
 
 def _ensure_pending_sheet() -> None:
-    worksheet = sheet_repo.get_sheet(PENDING_SHEET)
-    if not worksheet.get_all_values():
-        sheet_repo.append_row(PENDING_SHEET, PENDING_HEADERS)
+    global _PENDING_HEADERS_READY
+    with _STATE_LOCK:
+        if _PENDING_HEADERS_READY:
+            return
+        worksheet = sheet_repo.get_sheet(PENDING_SHEET)
+        if not worksheet.get_all_values():
+            sheet_repo.append_row(PENDING_SHEET, PENDING_HEADERS)
+        _PENDING_HEADERS_READY = True
 
 
 def _aware_datetime(value) -> datetime | None:
@@ -113,13 +120,18 @@ def clear_pending_confirmation(sender: str) -> None:
 
 
 def log_event(sender: str, message: str, status: str, invoice: str = "", error: str = "") -> None:
+    global _LOG_HEADERS_READY
     try:
-        worksheet = sheet_repo.get_sheet(LOG_SHEET)
-        values = worksheet.get_all_values()
-        if not values:
-            sheet_repo.append_row(LOG_SHEET, LOG_HEADERS)
-        elif len(values[0]) < len(LOG_HEADERS) or values[0][:len(LOG_HEADERS)] != LOG_HEADERS:
-            worksheet.update("A1:F1", [LOG_HEADERS])
+        with _STATE_LOCK:
+            if not _LOG_HEADERS_READY:
+                worksheet = sheet_repo.get_sheet(LOG_SHEET)
+                values = worksheet.get_all_values()
+                if not values:
+                    sheet_repo.append_row(LOG_SHEET, LOG_HEADERS)
+                elif len(values[0]) < len(LOG_HEADERS) or values[0][:len(LOG_HEADERS)] != LOG_HEADERS:
+                    worksheet.update("A1:F1", [LOG_HEADERS])
+                    sheet_repo.invalidate_cache(LOG_SHEET)
+                _LOG_HEADERS_READY = True
         sheet_repo.append_row(LOG_SHEET, [
             now_tz().strftime("%Y-%m-%d %H:%M:%S"), str(sender or ""),
             str(message or "")[:500], str(status or ""), str(invoice or ""), str(error or ""),

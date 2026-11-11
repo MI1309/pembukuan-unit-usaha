@@ -145,8 +145,7 @@ def _maybe_archive_daily_detail(sale_date: date) -> None:
         return
 
 
-def _save_sale(sale: dict) -> str:
-    _maybe_archive_daily_detail(sale["tanggal"])
+def _sale_rows(sale: dict) -> list[tuple[str, list]]:
     is_sale = sale.get("is_penjualan", True)
     income = sale["penjualan"] if is_sale else ""
     expense = "" if is_sale else sale["penjualan"]
@@ -162,11 +161,10 @@ def _save_sale(sale: dict) -> str:
         date_text, sale["produk"], sale["keterangan"],
         quantity_text, sale["satuan"], income, expense,
     ]
-    sheet_repo.append_rows_atomically([
+    return [
         (sale["unit"], unit_row),
         ("(2)Rincian Transaksi Harian", daily_detail_row),
-    ])
-    return None
+    ]
 
 
 def _format_sheet_date(value: date) -> str:
@@ -203,12 +201,21 @@ def process_sales(message: str, confirmed: bool = False) -> tuple[bool, str, dic
 
     saved = []
     with _SALES_LOCK:
+        groups = []
         for sale in prepared:
+            month_key = (sale["tanggal"].year, sale["tanggal"].month)
+            if not groups or groups[-1][0] != month_key:
+                groups.append((month_key, []))
+            groups[-1][1].append(sale)
+
+        for _, sales_group in groups:
             try:
-                _save_sale(sale)
-                saved.append(sale)
+                _maybe_archive_daily_detail(sales_group[0]["tanggal"])
+                rows = [row for sale in sales_group for row in _sale_rows(sale)]
+                sheet_repo.append_rows_atomically(rows)
+                saved.extend(sales_group)
             except Exception as error:
-                failed.append(f"{sale['produk']} — {error}")
+                failed.extend(f"{sale['produk']} — {error}" for sale in sales_group)
 
     lines = []
     if saved:

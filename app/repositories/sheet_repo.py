@@ -67,29 +67,36 @@ def append_row(sheet_name: str, row: list):
 def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
     spreadsheet = get_spreadsheet()
     requests = []
+    rows_by_name = {}
     for sheet_name, values in rows_by_sheet:
+        rows_by_name.setdefault(sheet_name, []).append(values)
+
+    for sheet_name, rows in rows_by_name.items():
         worksheet = get_sheet(sheet_name, create=False)
         if not worksheet:
             raise ValueError(f"Worksheet not found: {sheet_name}")
-        cells = []
-        for value in values:
-            if isinstance(value, bool):
-                cell_value = {"boolValue": value}
-            elif isinstance(value, (int, float)):
-                cell_value = {"numberValue": value}
-            else:
-                cell_value = {"stringValue": str(value or "")}
-            cells.append({"userEnteredValue": cell_value})
+        request_rows = []
+        for values in rows:
+            cells = []
+            for value in values:
+                if isinstance(value, bool):
+                    cell_value = {"boolValue": value}
+                elif isinstance(value, (int, float)):
+                    cell_value = {"numberValue": value}
+                else:
+                    cell_value = {"stringValue": str(value or "")}
+                cells.append({"userEnteredValue": cell_value})
+            request_rows.append({"values": cells})
         requests.append({
             "appendCells": {
                 "sheetId": worksheet.id,
-                "rows": [{"values": cells}],
+                "rows": request_rows,
                 "fields": "userEnteredValue",
             }
         })
 
     spreadsheet.batch_update({"requests": requests})
-    for sheet_name, _ in rows_by_sheet:
+    for sheet_name in rows_by_name:
         invalidate_cache(sheet_name)
 
 

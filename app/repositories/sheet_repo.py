@@ -1,14 +1,36 @@
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from threading import RLock
+
 from app.config import config
-from app.core.utils import parse_amount
 
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name(config.GOOGLE_CREDENTIALS_FILE, scope)
-client = gspread.authorize(creds)
-spreadsheet = client.open_by_key(config.SPREADSHEET_ID)
+creds = None
+client = None
+_spreadsheet = None
+_spreadsheet_lock = RLock()
+
+
+def get_client():
+    global creds, client
+    if client is None:
+        with _spreadsheet_lock:
+            if client is None:
+                creds = ServiceAccountCredentials.from_json_keyfile_name(config.GOOGLE_CREDENTIALS_FILE, scope)
+                client = gspread.authorize(creds)
+    return client
+
+
+def get_spreadsheet():
+    global _spreadsheet
+    if _spreadsheet is None:
+        with _spreadsheet_lock:
+            if _spreadsheet is None:
+                _spreadsheet = get_client().open_by_key(config.SPREADSHEET_ID)
+    return _spreadsheet
 
 def get_sheet(name: str, create=True):
+    spreadsheet = get_spreadsheet()
     try:
         return spreadsheet.worksheet(name)
     except gspread.exceptions.WorksheetNotFound:

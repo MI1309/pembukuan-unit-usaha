@@ -145,7 +145,7 @@ def create_backup_copy(folder_id: str | None = None) -> dict:
     """Create and return one spreadsheet copy without pruning or cleanup."""
     folder_id = folder_id or _get_or_create_folder()
     timestamp = now_tz().strftime("%Y%m%d_%H%M%S")
-    spreadsheet = sheet_repo.spreadsheet
+    spreadsheet = sheet_repo.get_spreadsheet()
     copy_name = f"Backup_{spreadsheet.title}_{timestamp}"
     copied = _drive_request(
         "POST",

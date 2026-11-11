@@ -1,6 +1,7 @@
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from threading import RLock
+from gspread.utils import numericise
 
 from app.config import config
 
@@ -64,4 +65,31 @@ def get_sales_data():
 
 def get_all_records(sheet_name: str) -> list:
     sheet = get_sheet(sheet_name, create=False)
-    return sheet.get_all_records() if sheet else []
+    if not sheet:
+        return []
+
+    values = sheet.get_all_values()
+    if not values:
+        return []
+
+    headers = []
+    used_headers = set()
+    for column, value in enumerate(values[0], start=1):
+        base = str(value).strip() or f"Column_{column}"
+        header = base
+        suffix = 2
+        while header in used_headers:
+            header = f"{base}_{suffix}"
+            suffix += 1
+        headers.append(header)
+        used_headers.add(header)
+
+    records = []
+    for row in values[1:]:
+        if not any(str(value).strip() for value in row):
+            continue
+        records.append({
+            header: numericise(row[index], default_blank="") if index < len(row) else ""
+            for index, header in enumerate(headers)
+        })
+    return records

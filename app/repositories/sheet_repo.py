@@ -115,10 +115,7 @@ def _records_from_values(values: list[list]) -> list[dict]:
 
 
 def _a1_column_range(sheet_name: str) -> str:
-    if _SIMPLE_SHEET_NAME.fullmatch(sheet_name):
-        sheet_reference = sheet_name
-    else:
-        sheet_reference = f"'{sheet_name.replace(chr(39), chr(39) * 2)}'"
+    sheet_reference = sheet_name if _SIMPLE_SHEET_NAME.fullmatch(sheet_name) else f"'{sheet_name.replace(chr(39), chr(39) * 2)}'"
     return f"{sheet_reference}!A:Z"
 
 
@@ -135,11 +132,20 @@ def get_all_records_many(sheet_names: list[str]) -> dict[str, list[dict]]:
                 uncached_names.append(name)
 
         if uncached_names:
-            ranges = [_a1_column_range(name) for name in uncached_names]
-            response = get_spreadsheet().values_batch_get(ranges, params={"majorDimension": "ROWS"})
-            value_ranges = response.get("valueRanges", [])
-            for name, value_range in zip(uncached_names, value_ranges):
-                records = _records_from_values(value_range.get("values", []))
+            if len(uncached_names) == 1:
+                name = uncached_names[0]
+                worksheet = get_sheet(name, create=False)
+                values = worksheet.get_all_values() if worksheet else []
+                value_sets = [(name, values)]
+            else:
+                ranges = [_a1_column_range(name) for name in uncached_names]
+                response = get_spreadsheet().values_batch_get(ranges, params={"majorDimension": "ROWS"})
+                value_sets = [
+                    (name, value_range.get("values", []))
+                    for name, value_range in zip(uncached_names, response.get("valueRanges", []))
+                ]
+            for name, values in value_sets:
+                records = _records_from_values(values)
                 _record_cache[name] = (monotonic() + _READ_CACHE_SECONDS, records)
                 records_by_sheet[name] = records
 

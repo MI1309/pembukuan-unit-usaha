@@ -257,10 +257,15 @@ def _period_from_message(message: str) -> tuple[str, date]:
                 return "day", date(year, month, day)
             except ValueError:
                 pass
-    match = re.search(r"\b(januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember|jan|feb|mar|apr|jun|jul|agu|agt|sep|okt|nov|des)\s+(\d{4})\b", text)
+    month_pattern = "|".join(sorted((re.escape(alias) for alias in MONTH_ALIASES), key=len, reverse=True))
+    match = re.search(rf"\b({month_pattern})(?:\s+(\d{{4}}))?\b", text)
     if match:
         month = MONTH_ALIASES[match.group(1)]
-        return "month", date(int(match.group(2)), month, 1)
+        year = int(match.group(2) or today.year)
+        try:
+            return "month", date(year, month, 1)
+        except ValueError:
+            pass
     match = re.search(r"\b(20\d{2})\b", text)
     if match:
         return "year", date(int(match.group(1)), 1, 1)
@@ -428,7 +433,7 @@ def handle_help_command(message: str) -> str | None:
         "• `rekap` → hari ini; `rekap kemarin` → kemarin\n"
         "• `rekap bulan ini` / `rekap bulan lalu`\n"
         "• `rekap tahun ini` / `rekap tahun lalu` / `rekap 2026`\n"
-        "• `rekap 2026-10` / `rekap oktober 2026` / `rekap okt 2026`\n"
+        "• `rekap jan` → Januari tahun ini; `rekap 2026-10` / `rekap oktober 2026` / `rekap okt 2026`\n"
         "• `rekap 15 okt` / `rekap 15-10-2026`\n\n"
         f"⚠️ Transaksi ≥ {format_rupiah(config.CONFIRM_THRESHOLD)} meminta konfirmasi `YA` / `BATAL`.\n\n"
         "👥 *3. FITUR KARYAWAN*\nKetik `help karyawan` untuk panduan karyawan, presensi, dan penggajian.\n"

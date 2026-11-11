@@ -50,7 +50,8 @@ def _payload_from_environ(environ) -> dict:
     query_values = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
     for key, values in query_values.items():
         if values:
-            payload.setdefault(key, values[-1])
+            if key == "secret" or key not in payload:
+                payload[key] = values[-1]
     return payload
 
 

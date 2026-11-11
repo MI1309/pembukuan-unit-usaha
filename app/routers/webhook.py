@@ -30,7 +30,8 @@ async def _webhook_payload(request: Request) -> dict:
         if items:
             value[key] = items[-1]
     for key, item in request.query_params.items():
-        value.setdefault(key, item)
+        if key == "secret" or key not in value:
+            value[key] = item
     return value
 
 

@@ -1,4 +1,6 @@
 import json
+from email import policy
+from email.parser import BytesParser
 from urllib.parse import parse_qs
 
 from fastapi import HTTPException
@@ -28,6 +30,20 @@ def _payload_from_environ(environ) -> dict:
         parsed = json.loads(body.decode("utf-8"))
         if isinstance(parsed, dict):
             payload.update(parsed)
+    elif body and content_type == "multipart/form-data":
+        raw_content_type = environ.get("CONTENT_TYPE", "")
+        message = BytesParser(policy=policy.default).parsebytes(
+            f"Content-Type: {raw_content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("ascii") + body
+        )
+        for part in message.iter_parts():
+            field_name = part.get_param("name", header="content-disposition")
+            if not field_name or part.get_content_disposition() != "form-data":
+                continue
+            value = part.get_content()
+            if isinstance(value, bytes):
+                charset = part.get_content_charset() or "utf-8"
+                value = value.decode(charset, errors="replace")
+            payload[field_name] = str(value)
     elif body:
         form_values = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
         payload.update({key: values[-1] for key, values in form_values.items() if values})

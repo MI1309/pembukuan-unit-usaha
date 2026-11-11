@@ -93,6 +93,35 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
         invalidate_cache(sheet_name)
 
 
+def archive_daily_detail(archive_month: str, rows: list[list], new_period_label: str) -> int:
+    source = get_sheet("(2)Rincian Transaksi Harian", create=False)
+    if not source:
+        raise ValueError("Worksheet rincian transaksi harian tidak ditemukan")
+    archive = get_sheet("_ArsipRincianHarian")
+    archive_headers = [
+        "Bulan Arsip", "Tanggal", "Nama Produk /Jasa/ Barang", "Keterangan Transaksi",
+        "Kuantitas", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)",
+    ]
+    if not archive.get("1:1") or not any(str(value).strip() for value in archive.get("1:1")[0]):
+        archive.update(range_name="A1:H1", values=[archive_headers])
+
+    archived_rows = [
+        [archive_month, *(row[:7] + [""] * max(0, 7 - len(row)))]
+        for row in rows
+        if any(str(value).strip() for value in row)
+    ]
+    if archived_rows:
+        archive.append_rows(archived_rows)
+
+    while len(source.get_all_values()) > 5:
+        source.delete_rows(6)
+
+    source.update(range_name="A3", values=[[new_period_label]])
+    invalidate_cache("(2)Rincian Transaksi Harian")
+    invalidate_cache("_ArsipRincianHarian")
+    return len(archived_rows)
+
+
 def update_cell(sheet_name: str, row: int, column: int, value):
     """Update a worksheet cell using Google Sheets' 1-based coordinates."""
     sheet = get_sheet(sheet_name, create=False)

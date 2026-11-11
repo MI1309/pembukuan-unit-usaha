@@ -1,3 +1,4 @@
+import calendar
 import re
 from datetime import date, datetime, timedelta
 from threading import RLock
@@ -74,11 +75,14 @@ def _normalise_sale(raw: dict) -> tuple[dict | None, str | None]:
     total = parse_amount(raw.get("total_harga") or raw.get("penjualan"))
     unit_price = parse_amount(raw.get("harga_satuan"))
     raw_total = parse_amount(raw.get("total_harga"))
+    purchase_unit = str(raw.get("satuan") or "").strip()
     if quantity > 0 and raw_total > 0 and quantity == raw_total:
-        return None, f"{product['nama']} {format_rupiah(raw_total)} — jumlah tidak disebut; sertakan kuantitas barang"
+        return None, f"{product_name} {format_rupiah(raw_total)} — jumlah tertukar dengan harga; kirim kuantitas dan harga dengan jelas"
     if not total and unit_price and quantity:
         total = round(unit_price * quantity)
-    if total <= 0 or (is_sale and quantity <= 0) or (not is_sale and quantity < 0):
+    if not is_sale and (quantity <= 0 or not purchase_unit):
+        return None, f"{product_name} — pembelian wajib mencantumkan kuantitas dan satuan"
+    if total <= 0 or quantity <= 0:
         return None, f"{product_name} — jumlah/harga salah"
     if quantity >= 1_000_000 or (is_sale and quantity >= total):
         return None, f"{product_name} {quantity:g} — jumlah tidak wajar atau tertukar dengan harga"
@@ -100,7 +104,7 @@ def _normalise_sale(raw: dict) -> tuple[dict | None, str | None]:
     return {
         "produk": product_name,
         "kategori": product["kategori"] if product else "PEMBELIAN",
-        "satuan": product["satuan"] if product else str(raw.get("satuan") or "").strip(),
+        "satuan": product["satuan"] if product else purchase_unit,
         "kuantitas": quantity,
         "penjualan": total,
         "is_penjualan": is_sale,
@@ -141,8 +145,44 @@ def _next_invoice(sale_date: date) -> str:
     return f"{sale_date:%Y.%m.%d}/INV/{counter}"
 
 
+def _daily_period_label(month_date: date) -> str:
+    month_start = date(month_date.year, month_date.month, 1)
+    last_day = calendar.monthrange(month_date.year, month_date.month)[1]
+    month_end = date(month_date.year, month_date.month, last_day)
+    return f"Periode: {month_start:%d %b %Y} s/d {month_end:%d %b %Y} Semua Unit Usaha"
+
+
+def _maybe_archive_daily_detail(sale_date: date) -> None:
+    sheet = sheet_repo.get_sheet("(2)Rincian Transaksi Harian", create=False)
+    if not sheet:
+        return
+    rows = sheet.get_all_values()
+    if len(rows) < 3:
+        sheet.update(range_name="A3", values=[[_daily_period_label(sale_date)]])
+        return
+    try:
+        label = str(rows[2][0]).strip()
+        match = re.search(r"\b(\d{2})\s+([A-Za-z]{3})\s+(\d{4})\b", label)
+        if not match:
+            return
+        current_month = datetime.strptime(f"{match.group(3)}-{match.group(2)}-01", "%Y-%b-%d").date()
+        if current_month.year == sale_date.year and current_month.month == sale_date.month:
+            return
+        archived_rows = rows[5:]
+        if archived_rows:
+            sheet_repo.archive_daily_detail(
+                current_month.strftime("%Y-%m"),
+                [row[:7] for row in archived_rows if len(row) >= 7],
+                _daily_period_label(sale_date),
+            )
+        sheet.update(range_name="A3", values=[[_daily_period_label(sale_date)]])
+    except Exception:
+        return
+
+
 def _save_sale(sale: dict) -> str:
     invoice = _next_invoice(sale["tanggal"])
+    _maybe_archive_daily_detail(sale["tanggal"])
     is_sale = sale.get("is_penjualan", True)
     income = sale["penjualan"] if is_sale else 0
     expense = 0 if is_sale else sale["penjualan"]
@@ -238,8 +278,8 @@ def _parse_date(value) -> date | None:
     return None
 
 
-def _sales_rows() -> list[dict]:
-    sales = []
+def _transaction_rows() -> list[dict]:
+    transactions = []
     records_by_unit = sheet_repo.get_all_records_many(config.UNIT_USAHA)
     for unit, records in records_by_unit.items():
         for row in records:
@@ -249,17 +289,28 @@ def _sales_rows() -> list[dict]:
             product = str(row.get("Nama Barang/Jasa /Produk", row.get("Produk", ""))).strip()
             if not product or re.match(r"^(sub)?total", product, re.I):
                 continue
-            amount = parse_amount(row.get("Pemasukan (Rp)", row.get("Pemasukan", 0)))
-            if amount <= 0:
+            income = parse_amount(row.get("Pemasukan (Rp)", row.get("Pemasukan", 0)))
+            expense = parse_amount(row.get("Pengeluaran (Rp)", row.get("Pengeluaran", 0)))
+            if income <= 0 and expense <= 0:
                 continue
-            sales.append({
+            transactions.append({
                 "date": sale_date,
                 "product": product,
                 "unit": str(row.get("Satuan (Rp)", row.get("Satuan", ""))).strip(),
                 "quantity": _number(row.get("Kuantitas", 0)),
-                "amount": amount,
+                "business_unit": re.sub(r"^\(\d+\)\s*", "", unit).strip(),
+                "income": income,
+                "expense": expense,
             })
-    return sales
+    return transactions
+
+
+def _sales_rows() -> list[dict]:
+    return [
+        {**row, "amount": row["income"]}
+        for row in _transaction_rows()
+        if row["income"] > 0
+    ]
 
 # private nomor functions
 def _number(value) -> float:
@@ -272,6 +323,11 @@ def _number(value) -> float:
 def _period_from_message(message: str) -> tuple[str, date]:
     text = message.lower().strip()
     today = now_tz().date()
+    if "minggu lalu" in text:
+        current_monday = today - timedelta(days=today.weekday())
+        return "week", current_monday - timedelta(days=7)
+    if re.search(r"minggu\s*(ini|sekarang)|mingguan|\bminggu\b", text):
+        return "week", today - timedelta(days=today.weekday())
     if "tahun lalu" in text:
         return "year", date(today.year - 1, 1, 1)
     if re.search(r"tahun\s*(ini|sekarang)|tahunan", text):
@@ -365,6 +421,42 @@ def _month_report(target: date, rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _week_report(start: date, rows: list[dict]) -> str:
+    end = start + timedelta(days=6)
+    selected = [row for row in rows if start <= row["date"] <= end]
+    period = (
+        f"{format_tanggal_id(datetime.combine(start, datetime.min.time()))}"
+        f" – {format_tanggal_id(datetime.combine(end, datetime.min.time()))}"
+    )
+    if not selected:
+        return f"📊 *REKAP TRANSAKSI MINGGUAN*\n📅 {period}\n━━━━━━━━━━━━━━━━━━\n_Belum ada transaksi tercatat._"
+
+    income_total = sum(row["income"] for row in selected)
+    expense_total = sum(row["expense"] for row in selected)
+    unit_totals = {}
+    for row in selected:
+        totals = unit_totals.setdefault(row["business_unit"], {"income": 0, "expense": 0, "count": 0})
+        totals["income"] += row["income"]
+        totals["expense"] += row["expense"]
+        totals["count"] += 1
+
+    lines = ["📊 *REKAP TRANSAKSI MINGGUAN*", f"📅 {period}", "━━━━━━━━━━━━━━━━━━", "*Per Unit Usaha:*"]
+    for unit, totals in sorted(unit_totals.items()):
+        lines += [
+            f"• *{unit}* ({totals['count']} transaksi)",
+            f"  Pemasukan: {format_rupiah(totals['income'])} | Pengeluaran: {format_rupiah(totals['expense'])}",
+        ]
+    lines += [
+        "━━━━━━━━━━━━━━━━━━",
+        f"📥 *TOTAL PEMASUKAN:* {format_rupiah(income_total)}",
+        f"📤 *TOTAL PENGELUARAN:* {format_rupiah(expense_total)}",
+        f"💰 *TOTAL NOMINAL SEMUA TRANSAKSI:* {format_rupiah(income_total + expense_total)}",
+        f"⚖️ *SELISIH:* {format_rupiah(income_total - expense_total)}",
+        f"🧾 {len(selected)} transaksi",
+    ]
+    return "\n".join(lines)
+
+
 def _year_report(target: date, rows: list[dict]) -> str:
     selected = [row for row in rows if row["date"].year == target.year]
     if not selected:
@@ -395,6 +487,8 @@ def process_rekap(message: str) -> str | None:
     if not re.search(r"\brekap\b", message, re.I):
         return None
     period_type, target = _period_from_message(message)
+    if period_type == "week":
+        return _week_report(target, _transaction_rows())
     rows = _sales_rows()
     if period_type == "year":
         return _year_report(target, rows)
@@ -468,22 +562,29 @@ def handle_help_command(message: str) -> str | None:
     if not re.fullmatch(r"(help|bantuan|panduan|cara|menu|bisa apa|\?|halo|hai|hi)", text):
         return None
     return (
-        "🤖 *PANDUAN BOT PENJUALAN*\n_" + config.COMPANY + "_\n━━━━━━━━━━━━━━━━━━\n"
+        "🤖 *PANDUAN BOT TRANSAKSI*\n_" + config.COMPANY + "_\n━━━━━━━━━━━━━━━━━━\n"
         "\n📝 *1. CATAT PENJUALAN*\nKirim pesan seperti ini:\n"
+        "Format: `penj [nama barang] | [keterangan] | [kuantitas] [satuan] | [total harga]`.\n"
+        "_penj telur ayam Fazza | jual ke warung A | 100 butir | 150rb_\n"
         "_penj. ayam jantan 40 ekor 1.400.000_\n"
         "_penj. telur ayam fazza 786 butir 1.179.000_\n"
         "_penj. anggur helio 32 kg 960rb_\n"
         "_penj. lele fazza 50 ekor @2000_\n\n"
         "Alias: `penj` / `jual` = pemasukan; `pembelian` / `beli` / `pemb` = pengeluaran.\n\n"
-        "🧾 *PEMBELIAN / PENGELUARAN*\nSertakan barang, jumlah, total harga, dan unit usaha:\n"
-        "_pembelian herbisida 60 botol total 3.600.000 unit Pertanian_\n"
-        "_beli pakan ayam 10 karung total 850rb unit Ternak Ayam Fazza_\n"
+        "🧾 *PEMBELIAN / PENGELUARAN*\nFormat: `pemb [nama barang/jasa] | [keterangan] | [kuantitas] [satuan] | [total] | unit [unit usaha]`.\n"
+        "Kategori: listrik, UHK, penyusutan, konsumsi dapur, dan PDAM.\n"
+        "_pemb listrik | tagihan November | 1 bulan | 1.200.000 | unit Pertanian_\n"
+        "_beli UHK | upah harian | 3 orang | 900rb | unit Pertanian_\n"
+        "_pemb penyusutan alat | periode November | 1 bulan | 500rb | unit Pertanian_\n"
+        "_pemb konsumsi dapur | belanja bahan | 1 paket | 250rb | unit Ternak Ayam Fazza_\n"
+        "_pemb PDAM | tagihan November | 1 bulan | 180rb | unit Pertanian_\n"
         "Unit: Pertanian, Ternak Ayam Fazza, Ternak Ayam Emran, Perikanan, atau Pabrik Pupuk.\n\n"
         "✅ Satu pesan dapat berisi banyak transaksi, biasanya satu transaksi per baris.\n"
-        "✅ Semua transaksi juga tercatat di `(2)Rincian Transaksi Harian` dengan unit usaha dan nomor invoice.\n"
+        "✅ Penjualan dan pembelian dicatat di ledger unit serta `(2)Rincian Transaksi Harian` dengan unit usaha dan nomor invoice.\n"
         "✅ Format harga: `350rb` / `350 ribu`, `2,5 jt` / `2,5 juta`, `1.400.000`, atau `@2000` per satuan.\n\n"
         "📊 *2. REKAP PENJUALAN*\n"
         "• `rekap` → hari ini; `rekap kemarin` → kemarin\n"
+        "• `rekap minggu ini` / `rekap minggu lalu` → total pemasukan, pengeluaran, dan semua nominal per unit (Senin–Minggu)\n"
         "• `rekap bulan ini` / `rekap bulan lalu`\n"
         "• `rekap tahun ini` / `rekap tahun lalu` / `rekap 2026`\n"
         "• `rekap jan` → Januari tahun ini; `rekap 2026-10` / `rekap oktober 2026` / `rekap okt 2026`\n"

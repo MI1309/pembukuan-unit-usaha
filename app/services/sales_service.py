@@ -252,20 +252,24 @@ def process_sales(message: str, confirmed: bool = False) -> tuple[bool, str, dic
             "PEMBELIAN / PENGELUARAN" if transaction_types == {False} else "TRANSAKSI"
         )
         lines += [f"✅ *{len(saved)} {heading} BERHASIL DISIMPAN*", "━━━━━━━━━━━━━━━━━━"]
-        total = 0
-        for index, (sale, invoice) in enumerate(saved, start=1):
-            total += sale["penjualan"]
-            amount_label = "Pemasukan" if sale.get("is_penjualan", True) else "Pengeluaran"
-            quantity_text = f"{sale['kuantitas']:g} {sale['satuan']} → " if sale["kuantitas"] > 0 else ""
-            lines += [f"{index}. *{sale['produk']}*", f"   🧾 {invoice}",
-                      f"   📅 {format_tanggal_id(datetime.combine(sale['tanggal'], datetime.min.time()))}",
-                      f"   ⚖️ {quantity_text}💰 {amount_label}: {format_rupiah(sale['penjualan'])}"]
+        total = sum(sale["penjualan"] for sale, _ in saved)
+        if len(saved) <= 8:
+            for index, (sale, invoice) in enumerate(saved, start=1):
+                amount_label = "Pemasukan" if sale.get("is_penjualan", True) else "Pengeluaran"
+                quantity_text = f"{sale['kuantitas']:g} {sale['satuan']} → " if sale["kuantitas"] > 0 else ""
+                lines += [f"{index}. *{sale['produk']}*", f"   🧾 {invoice}",
+                          f"   📅 {format_tanggal_id(datetime.combine(sale['tanggal'], datetime.min.time()))}",
+                          f"   ⚖️ {quantity_text}💰 {amount_label}: {format_rupiah(sale['penjualan'])}"]
+        else:
+            lines.append(f"🧾 {len(saved)} transaksi dicatat. Cek rekap untuk rincian.")
         lines += ["━━━━━━━━━━━━━━━━━━", f"💰 *Total transaksi: {format_rupiah(total)}*"]
     if failed:
         if saved:
             lines.append("")
         lines.append(f"⚠️ *{len(failed)} BARIS TIDAK DISIMPAN*")
-        lines.extend(f"• {error}" for error in failed)
+        lines.extend(f"• {error}" for error in failed[:10])
+        if len(failed) > 10:
+            lines.append(f"... dan {len(failed) - 10} baris gagal lainnya")
     return True, "\n".join(lines), {"invoices": [invoice for _, invoice in saved]}
 
 
@@ -569,24 +573,23 @@ def handle_help_command(message: str) -> str | None:
     return (
         "🤖 *PANDUAN BOT TRANSAKSI*\n_" + config.COMPANY + "_\n━━━━━━━━━━━━━━━━━━\n"
         "\n📝 *1. CATAT PENJUALAN*\nKirim pesan seperti ini:\n"
-        "Format: `penj [nama barang] | [keterangan] | [kuantitas] [satuan] | [total harga]`.\n"
-        "_penj telur ayam Fazza | jual ke warung A | 100 butir | 150rb_\n"
-        "_penj. ayam jantan 40 ekor 1.400.000_\n"
-        "_penj. telur ayam fazza 786 butir 1.179.000_\n"
-        "_penj. anggur helio 32 kg 960rb_\n"
-        "_penj. lele fazza 50 ekor @2000_\n\n"
+        "Format: `penj [nama barang] | [keterangan] | [kuantitas] | [satuan] | [harga satuan]`.\n"
+        "_penj telur ayam fazza | jual ke warung A | 100 | butir | 1500_\n"
+        "_penj ayam jantan | pesan toko | 40 | ekor | 35000_\n"
+        "_penj anggur helio | order pasaran | 15 | kg | 30000_\n"
+        "_penj lele fazza | pelanggan minggu ini | 50 | ekor | 18000_\n\n"
         "Alias: `penj` / `jual` = pemasukan; `pembelian` / `beli` / `pemb` = pengeluaran.\n\n"
-        "🧾 *PEMBELIAN / PENGELUARAN*\nFormat: `pemb [nama barang/jasa] | [keterangan] | [kuantitas] [satuan] | [total] | unit [unit usaha]`.\n"
+        "🧾 *PEMBELIAN / PENGELUARAN*\nFormat: `pemb [nama barang/jasa] | [keterangan] | [kuantitas] | [satuan] | [harga satuan] | unit [unit usaha]`.\n"
         "Kategori: listrik, UHK, penyusutan, konsumsi dapur, dan PDAM.\n"
-        "_pemb listrik | tagihan November | 1 bulan | 1.200.000 | unit Pertanian_\n"
-        "_beli UHK | upah harian | 3 orang | 900rb | unit Pertanian_\n"
-        "_pemb penyusutan alat | periode November | 1 bulan | 500rb | unit Pertanian_\n"
-        "_pemb konsumsi dapur | belanja bahan | 1 paket | 250rb | unit Ternak Ayam Fazza_\n"
-        "_pemb PDAM | tagihan November | 1 bulan | 180rb | unit Pertanian_\n"
+        "_pemb listrik | tagihan November | 1 | bulan | 1200000 | unit Pertanian_\n"
+        "_beli UHK | upah harian | 3 | orang | 300000 | unit Pertanian_\n"
+        "_pemb penyusutan alat | periode November | 1 | bulan | 500000 | unit Pertanian_\n"
+        "_pemb konsumsi dapur | belanja bahan | 1 | paket | 250000 | unit Ternak Ayam Fazza_\n"
+        "_pemb PDAM | tagihan November | 1 | bulan | 180000 | unit Pertanian_\n"
         "Unit: Pertanian, Ternak Ayam Fazza, Ternak Ayam Emran, Perikanan, atau Pabrik Pupuk.\n\n"
         "✅ Satu pesan dapat berisi banyak transaksi, biasanya satu transaksi per baris.\n"
         "✅ Penjualan dan pembelian dicatat di ledger unit serta `(2)Rincian Transaksi Harian` dengan unit usaha dan nomor invoice.\n"
-        "✅ Format harga: `350rb` / `350 ribu`, `2,5 jt` / `2,5 juta`, `1.400.000`, atau `@2000` per satuan.\n\n"
+        "✅ Harga satuan dipakai untuk menghitung total otomatis: kuantitas × harga satuan.\n\n"
         "📊 *2. REKAP PENJUALAN*\n"
         "• `rekap` → hari ini; `rekap kemarin` → kemarin\n"
         "• `rekap minggu ini` / `rekap minggu lalu` → total pemasukan, pengeluaran, dan semua nominal per unit (Senin–Minggu)\n"

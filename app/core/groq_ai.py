@@ -42,8 +42,8 @@ def _sales_prompt(today: str) -> str:
         "8. kuantitas adalah jumlah barang/jasa, bukan harga. Satuan huruf besar sesuai pesan/katalog.\n"
         "9. Angka keluaran berupa number polos. Titik ribuan diabaikan; koma desimal. Contoh 1.400.000=1400000, "
         "2,5 jt=2500000, 2,3 ribu=2300. rb/ribu/k dikali 1000; jt/juta dikali 1000000.\n"
-        "10. Jika total_harga disebut, tetap simpan sebagai harga total; namun cara baru yang diutamakan adalah harga_satuan per unit. "
-        "Sistem akan menghitung total = kuantitas × harga_satuan secara otomatis.\n"
+        "10. Cara yang diutamakan adalah harga_satuan per unit; sistem akan menghitung total otomatis = kuantitas × harga_satuan. "
+        "Jika total_harga juga disebut, tetap boleh diterima, tapi tidak wajib.\n"
         "11. Keterangan transaksi harus mengikuti pesan; tanggal gunakan YYYY-MM-DD dan default hari ini.\n"
         "12. Jangan berikan reasoning, tag thinking, atau teks di luar JSON."
     )
@@ -58,6 +58,8 @@ def _parse_pipe_transactions(message: str) -> dict | None:
     for line in message.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
+            continue
+        if line.lower() in {"rekap minggu ini", "rekap bulan ini", "help"}:
             continue
         fields = [field.strip() for field in line.split("|")]
         if len(fields) not in {4, 5}:

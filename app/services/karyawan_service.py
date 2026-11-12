@@ -296,6 +296,15 @@ def set_status_karyawan(nik: str, active: bool) -> str:
     return ("✅ " if active else "🚫 ") + f"*{employee['nama']}* ({employee['nik']}) sekarang *{'AKTIF' if active else 'NONAKTIF'}*."
 
 
+def delete_karyawan(nik: str) -> str:
+    with _WRITE_LOCK:
+        employee = get_karyawan(nik)
+        if not employee:
+            return f"❌ NIK *{normalize_nik(nik)}* tidak ditemukan."
+        sheet_repo.delete_row(EMPLOYEE_SHEET, employee["row"])
+    return f"✅ Data karyawan *{employee['nama']}* ({employee['nik']}) telah dihapus dari database. Riwayat presensi tetap tersimpan."
+
+
 def _attendance_records() -> list[dict]:
     result = []
     for row_number, record in enumerate(sheet_repo.get_all_records(ATTENDANCE_SHEET), start=2):
@@ -563,6 +572,7 @@ def _help_text(admin: bool) -> str:
             "• `ubah karyawan 001 alamat Jl. Sudirman No. 5`",
             "", "🚫 *4. STATUS KARYAWAN*",
             "• `nonaktifkan karyawan 001` / `aktifkan karyawan 001`",
+            "• `hapus karyawan 001` lalu `hapus karyawan 001 konfirmasi` → Hapus permanen data profil",
             "", "💼 *5. PRESENSI DAN PENGGAJIAN*",
             "• `presensi hari ini` → Ringkasan kehadiran",
             "• `masuk 001` / `pulang 001` → Catat presensi karyawan",
@@ -709,6 +719,21 @@ def handle_karyawan(message: str, sender: str) -> str | None:
     match = re.fullmatch(r"tambah\s+karyawan(?:\s+(.+))?", text, re.I)
     if match:
         return add_karyawan(match.group(1) or "") if admin else MSG_ADMIN_ONLY
+
+    match = re.fullmatch(r"hapus\s+karyawan\s+(\d{1,6})(?:\s+(konfirmasi))?", text, re.I)
+    if match:
+        if not admin:
+            return MSG_ADMIN_ONLY
+        nik = normalize_nik(match.group(1))
+        if match.group(2):
+            return delete_karyawan(nik)
+        employee = get_karyawan(nik)
+        if not employee:
+            return f"❌ NIK *{nik}* tidak ditemukan."
+        return (f"⚠️ Anda akan menghapus profil *{employee['nama']}* ({employee['nik']}) secara permanen.\n"
+                f"Untuk melanjutkan, kirim `hapus karyawan {employee['nik']} konfirmasi`. Riwayat presensi tetap tersimpan.")
+    if re.fullmatch(r"hapus\s+karyawan", text, re.I):
+        return "Format: `hapus karyawan <NIK>`, lalu konfirmasi dengan `hapus karyawan <NIK> konfirmasi`." if admin else MSG_ADMIN_ONLY
 
     match = re.fullmatch(r"ubah\s+karyawan\s+(\d{1,6})\s+(nama|jabatan|departemen|dept|gaji|hp|alamat)\s+(.+)", text, re.I)
     if match:

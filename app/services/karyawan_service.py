@@ -551,6 +551,12 @@ def _help_text(admin: bool) -> str:
         "• `presensi saya` → Rekap presensi bulan ini",
         "• `slip gaji` / `slip gaji 2026-10` → Slip gaji sendiri",
         "• `cek data saya` → Lihat profil pribadi",
+        "", "📋 *SALIN & KIRIM PESAN*",
+        "`masuk`",
+        "`pulang`",
+        "`izin acara keluarga`",
+        "`presensi saya`",
+        "`slip gaji`",
     ]
     if admin:
         lines += [

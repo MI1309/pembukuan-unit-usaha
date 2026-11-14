@@ -2,6 +2,7 @@ import re
 
 from app.repositories import sheet_repo
 from app.config import config
+from app.setup_reference_structure import setup_reference_structure
 
 def setup_sheet_unit(sheet_name):
     """Create or format a unit ledger using the shared 9-column layout."""
@@ -19,32 +20,54 @@ def setup_sheet_unit(sheet_name):
         title = str(values[0][0]).strip() if values[0] else ''
         if title.lower().startswith('kakorlap unit usaha') and len(values) > 1:
             sheet.update('A2:I2', [headers])
-        for row_number, row in enumerate(values, start=1):
-            if any(str(value).strip().lower() == 'jumlah' for value in row):
-                sheet.format(f'A{row_number}:I{row_number}', {
-                    'backgroundColor': {'red': 0.91, 'green': 0.65, 'blue': 0.0},
-                    'textFormat': {'bold': True},
-                })
         print(f"ℹ️ Sheet Unit '{sheet_name}' sudah ada.")
 
-    sheet.format('A1:I1', {
-        'backgroundColor': {'red': 0.12, 'green': 0.22, 'blue': 0.39},
-        'textFormat': {'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}, 'bold': True, 'fontSize': 14},
-        'horizontalAlignment': 'CENTER',
-        'verticalAlignment': 'MIDDLE',
-    })
-    sheet.format('A2:I2', {
-        'backgroundColor': {'red': 0.12, 'green': 0.22, 'blue': 0.39},
-        'textFormat': {'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}, 'bold': True},
-        'horizontalAlignment': 'CENTER',
-        'verticalAlignment': 'MIDDLE',
-        'wrapStrategy': 'WRAP',
-    })
-    sheet.freeze(rows=2)
-    sheet.format('B:B', {'numberFormat': {'type': 'DATE', 'pattern': 'dd mmm yyyy'}})
-    sheet.format('F:I', {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0'}})
+    requests = [
+        {'repeatCell': {
+            'range': {'sheetId': sheet.id, 'startRowIndex': 0, 'endRowIndex': 1, 'startColumnIndex': 0, 'endColumnIndex': 9},
+            'cell': {'userEnteredFormat': {
+                'backgroundColor': {'red': 0.12, 'green': 0.22, 'blue': 0.39},
+                'textFormat': {'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}, 'bold': True, 'fontSize': 14},
+                'horizontalAlignment': 'CENTER', 'verticalAlignment': 'MIDDLE',
+            }},
+            'fields': 'userEnteredFormat',
+        }},
+        {'repeatCell': {
+            'range': {'sheetId': sheet.id, 'startRowIndex': 1, 'endRowIndex': 2, 'startColumnIndex': 0, 'endColumnIndex': 9},
+            'cell': {'userEnteredFormat': {
+                'backgroundColor': {'red': 0.12, 'green': 0.22, 'blue': 0.39},
+                'textFormat': {'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}, 'bold': True},
+                'horizontalAlignment': 'CENTER', 'verticalAlignment': 'MIDDLE', 'wrapStrategy': 'WRAP',
+            }},
+            'fields': 'userEnteredFormat',
+        }},
+        {'repeatCell': {
+            'range': {'sheetId': sheet.id, 'startRowIndex': 1, 'startColumnIndex': 1, 'endColumnIndex': 2},
+            'cell': {'userEnteredFormat': {'numberFormat': {'type': 'DATE', 'pattern': 'dd mmm yyyy'}}},
+            'fields': 'userEnteredFormat.numberFormat',
+        }},
+        {'repeatCell': {
+            'range': {'sheetId': sheet.id, 'startRowIndex': 1, 'startColumnIndex': 5, 'endColumnIndex': 9},
+            'cell': {'userEnteredFormat': {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0'}}},
+            'fields': 'userEnteredFormat.numberFormat',
+        }},
+        {'updateSheetProperties': {
+            'properties': {'sheetId': sheet.id, 'gridProperties': {'frozenRowCount': 2}},
+            'fields': 'gridProperties.frozenRowCount',
+        }},
+    ]
+    for row_number, row in enumerate(values, start=1):
+        if any(str(value).strip().lower() == 'jumlah' for value in row):
+            requests.append({'repeatCell': {
+                'range': {'sheetId': sheet.id, 'startRowIndex': row_number - 1, 'endRowIndex': row_number, 'startColumnIndex': 0, 'endColumnIndex': 9},
+                'cell': {'userEnteredFormat': {
+                    'backgroundColor': {'red': 0.91, 'green': 0.65, 'blue': 0.0},
+                    'textFormat': {'bold': True},
+                }},
+                'fields': 'userEnteredFormat.backgroundColor,userEnteredFormat.textFormat',
+            }})
     widths = [110, 125, 230, 290, 115, 105, 145, 145, 145]
-    sheet.spreadsheet.batch_update({'requests': [{
+    requests.extend({
         'updateDimensionProperties': {
             'range': {
                 'sheetId': sheet.id,
@@ -55,7 +78,8 @@ def setup_sheet_unit(sheet_name):
             'properties': {'pixelSize': width},
             'fields': 'pixelSize',
         }
-    } for column, width in enumerate(widths)]})
+    } for column, width in enumerate(widths))
+    sheet.spreadsheet.batch_update({'requests': requests})
 
 
 def _format_karyawan_sheets():
@@ -77,43 +101,64 @@ def _format_karyawan_sheets():
         'Slip Gaji': 'A1:Q1',
         'Penyesuaian Gaji': 'A1:H1',
     }
-    for name, header_range in ranges.items():
-        worksheet = sheet_repo.get_sheet(name)
-        worksheet.freeze(rows=1)
-        worksheet.format(header_range, header_style)
-        requests = []
-        for column, width in enumerate(widths[name]):
-            requests.append({
-                'updateDimensionProperties': {
-                    'range': {
-                        'sheetId': worksheet.id,
-                        'dimension': 'COLUMNS',
-                        'startIndex': column,
-                        'endIndex': column + 1,
-                    },
-                    'properties': {'pixelSize': width},
-                    'fields': 'pixelSize',
-                }
-            })
-        worksheet.spreadsheet.batch_update({'requests': requests})
+    worksheets = {name: sheet_repo.get_sheet(name) for name in ranges}
+    spreadsheet = next(iter(worksheets.values())).spreadsheet
+    requests = []
+    for name, worksheet in worksheets.items():
+        column_count = len(widths[name])
+        requests.extend([
+            {'updateSheetProperties': {
+                'properties': {'sheetId': worksheet.id, 'gridProperties': {'frozenRowCount': 1}},
+                'fields': 'gridProperties.frozenRowCount',
+            }},
+            {'repeatCell': {
+                'range': {'sheetId': worksheet.id, 'startRowIndex': 0, 'endRowIndex': 1, 'startColumnIndex': 0, 'endColumnIndex': column_count},
+                'cell': {'userEnteredFormat': header_style},
+                'fields': 'userEnteredFormat',
+            }},
+        ])
+        requests.extend({
+            'updateDimensionProperties': {
+                'range': {'sheetId': worksheet.id, 'dimension': 'COLUMNS', 'startIndex': column, 'endIndex': column + 1},
+                'properties': {'pixelSize': width},
+                'fields': 'pixelSize',
+            }
+        } for column, width in enumerate(widths[name]))
 
-    sheet_repo.get_sheet('Database Karyawan').format('A:A', {'numberFormat': {'type': 'TEXT'}})
-    sheet_repo.get_sheet('Database Karyawan').format('G:G', {'numberFormat': {'type': 'TEXT'}})
-    sheet_repo.get_sheet('Database Karyawan').format('E2:E', {'numberFormat': {'type': 'DATE', 'pattern': 'yyyy-mm-dd'}})
-    sheet_repo.get_sheet('Database Karyawan').format('F2:F', {'numberFormat': {'type': 'CURRENCY', 'pattern': '"Rp" #,##0'}})
-    sheet_repo.get_sheet('Database Karyawan').format('K2:K', {'numberFormat': {'type': 'DATE', 'pattern': 'yyyy-mm-dd'}})
-    sheet_repo.get_sheet('Presensi Karyawan').format('A2:A', {'numberFormat': {'type': 'DATE', 'pattern': 'yyyy-mm-dd'}})
-    sheet_repo.get_sheet('Presensi Karyawan').format('B:B', {'numberFormat': {'type': 'TEXT'}})
-    sheet_repo.get_sheet('Presensi Karyawan').format('D:E', {'numberFormat': {'type': 'TEXT'}})
-    sheet_repo.get_sheet('Slip Gaji').format('A:A', {'numberFormat': {'type': 'TEXT'}})
-    sheet_repo.get_sheet('Slip Gaji').format('C:C', {'numberFormat': {'type': 'TEXT'}})
-    sheet_repo.get_sheet('Slip Gaji').format('I2:M', {'numberFormat': {'type': 'CURRENCY', 'pattern': '"Rp" #,##0'}})
-    sheet_repo.get_sheet('Slip Gaji').format('N2:N', {'numberFormat': {'type': 'DATE_TIME', 'pattern': 'yyyy-mm-dd hh:mm'}})
-    sheet_repo.get_sheet('Slip Gaji').format('O2:Q', {'numberFormat': {'type': 'CURRENCY', 'pattern': '"Rp" #,##0'}})
-    sheet_repo.get_sheet('Penyesuaian Gaji').format('A2:A', {'numberFormat': {'type': 'DATE', 'pattern': 'yyyy-mm-dd'}})
-    sheet_repo.get_sheet('Penyesuaian Gaji').format('B:B', {'numberFormat': {'type': 'TEXT'}})
-    sheet_repo.get_sheet('Penyesuaian Gaji').format('D:D', {'numberFormat': {'type': 'TEXT'}})
-    sheet_repo.get_sheet('Penyesuaian Gaji').format('F2:F', {'numberFormat': {'type': 'CURRENCY', 'pattern': '"Rp" #,##0'}})
+    number_formats = [
+        ('Database Karyawan', 0, 1, 0, None, {'type': 'TEXT'}),
+        ('Database Karyawan', 6, 7, 0, None, {'type': 'TEXT'}),
+        ('Database Karyawan', 4, 5, 1, None, {'type': 'DATE', 'pattern': 'yyyy-mm-dd'}),
+        ('Database Karyawan', 5, 6, 1, None, {'type': 'CURRENCY', 'pattern': '"Rp" #,##0'}),
+        ('Database Karyawan', 10, 11, 1, None, {'type': 'DATE', 'pattern': 'yyyy-mm-dd'}),
+        ('Presensi Karyawan', 0, 1, 1, None, {'type': 'DATE', 'pattern': 'yyyy-mm-dd'}),
+        ('Presensi Karyawan', 1, 2, 0, None, {'type': 'TEXT'}),
+        ('Presensi Karyawan', 3, 5, 0, None, {'type': 'TEXT'}),
+        ('Slip Gaji', 0, 1, 0, None, {'type': 'TEXT'}),
+        ('Slip Gaji', 2, 3, 0, None, {'type': 'TEXT'}),
+        ('Slip Gaji', 8, 13, 1, None, {'type': 'CURRENCY', 'pattern': '"Rp" #,##0'}),
+        ('Slip Gaji', 13, 14, 1, None, {'type': 'DATE_TIME', 'pattern': 'yyyy-mm-dd hh:mm'}),
+        ('Slip Gaji', 14, 17, 1, None, {'type': 'CURRENCY', 'pattern': '"Rp" #,##0'}),
+        ('Penyesuaian Gaji', 0, 1, 1, None, {'type': 'DATE', 'pattern': 'yyyy-mm-dd'}),
+        ('Penyesuaian Gaji', 1, 2, 0, None, {'type': 'TEXT'}),
+        ('Penyesuaian Gaji', 3, 4, 0, None, {'type': 'TEXT'}),
+        ('Penyesuaian Gaji', 5, 6, 1, None, {'type': 'CURRENCY', 'pattern': '"Rp" #,##0'}),
+    ]
+    for name, start_column, end_column, start_row, end_row, number_format in number_formats:
+        worksheet = worksheets[name]
+        cell_range = {
+            'sheetId': worksheet.id,
+            'startRowIndex': start_row,
+            'startColumnIndex': start_column,
+            'endColumnIndex': end_column,
+        }
+        if end_row is not None:
+            cell_range['endRowIndex'] = end_row
+        requests.append({'repeatCell': {
+            'range': cell_range,
+            'cell': {'userEnteredFormat': {'numberFormat': number_format}},
+            'fields': 'userEnteredFormat.numberFormat',
+        }})
 
     validation_ranges = [
         ('Database Karyawan', 'I2:I', 'one_of_list', ['Aktif', 'Nonaktif']),
@@ -121,7 +166,6 @@ def _format_karyawan_sheets():
         ('Penyesuaian Gaji', 'E2:E', 'one_of_list', ['Bonus', 'Potongan']),
     ]
     for name, cell_range, condition, values in validation_ranges:
-        worksheet = sheet_repo.get_sheet(name)
         match = re.fullmatch(r'([A-Z]+)(\d+):([A-Z]+)', cell_range)
         if not match:
             continue
@@ -129,7 +173,8 @@ def _format_karyawan_sheets():
         for character in match.group(1):
             start_col = start_col * 26 + ord(character) - ord('A') + 1
         start_col -= 1
-        worksheet.spreadsheet.batch_update({'requests': [{
+        worksheet = worksheets[name]
+        requests.append({
             'setDataValidation': {
                 'range': {
                     'sheetId': worksheet.id,
@@ -147,91 +192,62 @@ def _format_karyawan_sheets():
                     'showCustomUi': True,
                 },
             }
-        }]})
+        })
 
     recap_widths = [120, 220, 110, 100, 140, 140]
-    for recap_name in ('_RekapHarian', '_RekapBulanan'):
+    for recap_name in ('_RekapHarian', '(1)Rekap Bulanan '):
         worksheet = sheet_repo.get_sheet(recap_name)
-        worksheet.freeze(rows=1)
-        worksheet.format('A1:F1', header_style)
-        worksheet.format('A2:A', {'numberFormat': {'type': 'TEXT'}})
-        worksheet.format('C2:C', {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0.##'}})
-        worksheet.format('E2:E', {'numberFormat': {'type': 'CURRENCY', 'pattern': '"Rp" #,##0'}})
-        for column, width in enumerate(recap_widths):
-            worksheet.spreadsheet.batch_update({'requests': [{
-                'updateDimensionProperties': {
-                    'range': {
-                        'sheetId': worksheet.id,
-                        'dimension': 'COLUMNS',
-                        'startIndex': column,
-                        'endIndex': column + 1,
-                    },
-                    'properties': {'pixelSize': width},
-                    'fields': 'pixelSize',
-                }
-            }]})
+        requests.extend([
+            {'updateSheetProperties': {
+                'properties': {'sheetId': worksheet.id, 'gridProperties': {'frozenRowCount': 1}},
+                'fields': 'gridProperties.frozenRowCount',
+            }},
+            {'repeatCell': {
+                'range': {'sheetId': worksheet.id, 'startRowIndex': 0, 'endRowIndex': 1, 'startColumnIndex': 0, 'endColumnIndex': 6},
+                'cell': {'userEnteredFormat': header_style},
+                'fields': 'userEnteredFormat',
+            }},
+            {'repeatCell': {
+                'range': {'sheetId': worksheet.id, 'startRowIndex': 1, 'startColumnIndex': 0, 'endColumnIndex': 1},
+                'cell': {'userEnteredFormat': {'numberFormat': {'type': 'TEXT'}}},
+                'fields': 'userEnteredFormat.numberFormat',
+            }},
+            {'repeatCell': {
+                'range': {'sheetId': worksheet.id, 'startRowIndex': 1, 'startColumnIndex': 2, 'endColumnIndex': 3},
+                'cell': {'userEnteredFormat': {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0.##'}}},
+                'fields': 'userEnteredFormat.numberFormat',
+            }},
+            {'repeatCell': {
+                'range': {'sheetId': worksheet.id, 'startRowIndex': 1, 'startColumnIndex': 4, 'endColumnIndex': 5},
+                'cell': {'userEnteredFormat': {'numberFormat': {'type': 'CURRENCY', 'pattern': '"Rp" #,##0'}}},
+                'fields': 'userEnteredFormat.numberFormat',
+            }},
+        ])
+        requests.extend({
+            'updateDimensionProperties': {
+                'range': {'sheetId': worksheet.id, 'dimension': 'COLUMNS', 'startIndex': column, 'endIndex': column + 1},
+                'properties': {'pixelSize': width},
+                'fields': 'pixelSize',
+            }
+        } for column, width in enumerate(recap_widths))
+
+    spreadsheet.batch_update({'requests': requests})
 
 def init_all_sheets():
     print("⏳ Memulai inisialisasi struktur Multi-Unit...")
-    
-    # 1. Setup semua Unit Usaha
+    setup_status = setup_reference_structure(apply=True)
+    if setup_status:
+        print("❌ Setup struktur spreadsheet belum lengkap; periksa pesan di atas.")
+        return False
+
     for unit in config.UNIT_USAHA:
         setup_sheet_unit(unit)
 
-    # 2. Setup Sheet Arsip Transaksi (Rollover)
-    try:
-        arsip = sheet_repo.get_sheet("_ArsipTransaksi")
-        if not arsip.get_all_values():
-            headers = ['Unit Usaha', 'Nomor', 'Tanggal', 'Nama Barang/Jasa/Produk', 'Keterangan Transaksi', 'Kuantitas', 'Satuan', 'Pemasukan (Rp)', 'Pengeluaran (Rp)', 'Saldo', 'Diarsipkan']
-            arsip.append_row(headers)
-            print("✅ Sheet _ArsipTransaksi dibuat.")
-    except Exception as e:
-        print(f"❌ Gagal setup _ArsipTransaksi: {e}")
+    meta = sheet_repo.get_sheet("_Meta", create=False)
+    meta_values = meta.get_all_values()
+    if not any(row and row[0].strip() == "INV_COUNTER" for row in meta_values[1:]):
+        sheet_repo.append_row("_Meta", ["INV_COUNTER", "0"])
 
-    # 3. Setup Sheet Logs & Meta
-    try:
-        logs = sheet_repo.get_sheet("_Logs")
-        log_headers = ['Timestamp', 'Sender', 'Raw Message', 'Status', 'Faktur', 'Error']
-        log_values = logs.get_all_values()
-        if not log_values:
-            logs.append_row(log_headers)
-        elif len(log_values[0]) < len(log_headers) or log_values[0][:len(log_headers)] != log_headers:
-            logs.update('A1:F1', [log_headers])
-        meta = sheet_repo.get_sheet("_Meta")
-        if not meta.get_all_values():
-            meta.append_row(['Key', 'Value'])
-            meta.append_row(['INV_COUNTER', '0'])
-        pending = sheet_repo.get_sheet("_PendingConfirm")
-        if not pending.get_all_values():
-            pending.append_row(['Sender', 'Message', 'ExpiresAt'])
-        daily_recap = sheet_repo.get_sheet("_RekapHarian")
-        if not daily_recap.get_all_values():
-            daily_recap.append_row(['Tanggal', 'Produk', 'Kuantitas', 'Satuan', 'Total (Rp)', 'Jumlah Transaksi'])
-        monthly_recap = sheet_repo.get_sheet("_RekapBulanan")
-        if not monthly_recap.get_all_values():
-            monthly_recap.append_row(['Bulan', 'Produk', 'Kuantitas', 'Satuan', 'Total (Rp)', 'Jumlah Transaksi'])
-        print("✅ Sheet _Logs, _Meta, _PendingConfirm & rekap siap.")
-    except Exception as e:
-        print(f"❌ Gagal setup _Logs & _Meta: {e}")
-
-    # 4. Setup Database Karyawan & Presensi (Untuk Modul 2 nanti)
-    try:
-        kar = sheet_repo.get_sheet("Database Karyawan")
-        if not kar.get_all_values():
-            kar.append_row(['NIK', 'Nama Karyawan', 'Jabatan', 'Departemen', 'Tanggal Masuk', 'Gaji Pokok', 'No. HP', 'Alamat', 'Status', 'Tempat Lahir', 'Tanggal Lahir', 'Jenis Kelamin', 'Status Nikah', 'Pendidikan', 'Pengalaman Kerja'])
-        
-        pres = sheet_repo.get_sheet("Presensi Karyawan")
-        if not pres.get_all_values():
-            pres.append_row(['Tanggal', 'NIK', 'Nama Karyawan', 'Jam Masuk', 'Jam Keluar', 'Status', 'Keterangan', 'Lembur (jam)'])
-        gaji = sheet_repo.get_sheet("Slip Gaji")
-        if not gaji.get_all_values():
-            gaji.append_row(['NIK', 'Nama', 'Periode', 'Hadir', 'Terlambat', 'Izin/Sakit', 'Cuti', 'Alpha', 'Gaji Pokok', 'Tunjangan', 'Potongan Alpha', 'Potongan Telat', 'Gaji Bersih', 'Dicetak', 'Lembur', 'Bonus', 'Potongan Lain'])
-        adj = sheet_repo.get_sheet("Penyesuaian Gaji")
-        if not adj.get_all_values():
-            adj.append_row(['Tanggal', 'NIK', 'Nama', 'Periode', 'Jenis', 'Jumlah (Rp)', 'Keterangan', 'Dicatat Oleh'])
-        _format_karyawan_sheets()
-        print("✅ Sheet Database Karyawan, Presensi, Slip Gaji & Penyesuaian siap.")
-    except Exception as e:
-        print(f"❌ Gagal setup Database Karyawan: {e}")
-
+    _format_karyawan_sheets()
     print("🎉 SEMUA STRUKTUR MULTI-UNIT SIAP DIGUNAKAN!")
+    return True

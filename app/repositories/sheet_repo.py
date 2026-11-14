@@ -382,7 +382,17 @@ def _records_from_values(values: list[list]) -> list[dict]:
         return []
 
     title = str(values[0][0]).strip().lower() if values[0] else ""
-    header_row = 1 if title.startswith("kakorlap unit usaha") and len(values) > 1 else 0
+    if title.startswith("kakorlap unit usaha"):
+        header_row = 1
+    elif title.startswith("industri pertanian terpadu"):
+        header_row = next(
+            (index for index, row in enumerate(values[1:], start=1)
+             if row and str(row[0]).strip().lower() == "tanggal"
+             and len(row) > 1 and "produk" in str(row[1]).strip().lower()),
+            len(values),
+        )
+    else:
+        header_row = 0
     if header_row >= len(values):
         return []
 
@@ -452,3 +462,21 @@ def get_all_records_many(sheet_names: list[str]) -> dict[str, list[dict]]:
 
 def get_all_records(sheet_name: str) -> list:
     return get_all_records_many([sheet_name])[sheet_name]
+
+
+def archive_unit_transactions(rows_by_unit: dict[str, list[tuple[int, list]]], archived_at: str) -> int:
+    archive = get_sheet("_ArsipTransaksi")
+    archived_rows = []
+    for unit, rows in rows_by_unit.items():
+        for _, row in rows:
+            values = list(row[:9]) + [""] * max(0, 9 - len(row))
+            archived_rows.append([unit, *values, archived_at])
+    if archived_rows:
+        archive.append_rows(archived_rows, value_input_option="USER_ENTERED")
+        for unit, rows in rows_by_unit.items():
+            worksheet = get_sheet(unit, create=False)
+            for row_number, _ in reversed(rows):
+                worksheet.delete_rows(row_number)
+            invalidate_cache(unit)
+    invalidate_cache("_ArsipTransaksi")
+    return len(archived_rows)

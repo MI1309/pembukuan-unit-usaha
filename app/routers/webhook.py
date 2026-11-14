@@ -15,8 +15,9 @@ router = APIRouter()
 # setup
 @router.get("/setup")
 def setup_database():
-    init_all_sheets()
-    return {"status": "success", "message": "Setup sheets selesai. Cek terminal untuk detail."}
+    if not init_all_sheets():
+        raise HTTPException(status_code=500, detail="Setup sheets gagal atau belum lengkap. Periksa log aplikasi.")
+    return {"status": "success", "message": "Setup sheets selesai."}
 
 
 # webhook private for Fonnte

@@ -503,8 +503,12 @@ def process_rekap(message: str) -> str | None:
 def _replace_recap_rows(sheet_name: str, period: str, selected: list[dict]) -> None:
     worksheet = sheet_repo.get_sheet(sheet_name)
     if not worksheet.get_all_values():
-        period_header = "Tanggal" if sheet_name == "_RekapHarian" else "Bulan"
-        sheet_repo.append_row(sheet_name, [period_header, "Produk", "Kuantitas", "Satuan", "Total (Rp)", "Jumlah Transaksi"])
+        headers = (
+            ["Tanggal", "Produk", "Kuantitas", "Satuan", "Total (Rp)", "Jumlah Transaksi"]
+            if sheet_name == "_RekapHarian"
+            else ["Bulan", "Produk/Jasa/Barang", "Kuantitas", "Satuan", "Total (Rp)", "Jumlah Transaksi"]
+        )
+        sheet_repo.append_row(sheet_name, headers)
     records = sheet_repo.get_all_records(sheet_name)
     matching_rows = [index + 2 for index, row in enumerate(records)
                      if str(row.get("Tanggal", row.get("Bulan", ""))).strip() == period]
@@ -536,7 +540,7 @@ def save_monthly_recap(target: date | None = None) -> None:
     period = target.strftime("%Y-%m")
     selected = [row for row in _sales_rows()
                 if row["date"].year == target.year and row["date"].month == target.month]
-    _replace_recap_rows("_RekapBulanan", period, selected)
+    _replace_recap_rows("(1)Rekap Bulanan ", period, selected)
 
 
 def send_daily_recap() -> str:
@@ -572,6 +576,10 @@ def handle_help_command(message: str) -> str | None:
         "_penj ayam jantan | pesan toko | 40 | ekor | 35000_\n"
         "_penj anggur helio | order pasaran | 15 | kg | 30000_\n"
         "_penj lele fazza | pelanggan minggu ini | 50 | ekor | 18000_\n\n"
+        "📋 *SALIN & KIRIM PESAN*\n"
+        "`penj telur ayam | jual ke warung | 10 | butir | 1500`\n"
+        "`pemb listrik | tagihan November | 1 | bulan | 1200000 | unit Pertanian`\n"
+        "`rekap bulan ini`\n\n"
         "Alias: `penj` / `jual` = pemasukan; `pembelian` / `beli` / `pemb` = pengeluaran.\n\n"
         "🧾 *PEMBELIAN / PENGELUARAN*\nFormat: `pemb [nama barang/jasa] | [keterangan] | [kuantitas] | [satuan] | [harga satuan] | unit [unit usaha]`.\n"
         "Kategori: listrik, UHK, penyusutan, konsumsi dapur, dan PDAM.\n"

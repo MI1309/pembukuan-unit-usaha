@@ -576,10 +576,7 @@ def handle_help_command(message: str) -> str | None:
         "_penj ayam jantan | pesan toko | 40 | ekor | 35000_\n"
         "_penj anggur helio | order pasaran | 15 | kg | 30000_\n"
         "_penj lele fazza | pelanggan minggu ini | 50 | ekor | 18000_\n\n"
-        "📋 *SALIN & KIRIM PESAN*\n"
-        "`penj telur ayam | jual ke warung | 10 | butir | 1500`\n"
-        "`pemb listrik | tagihan November | 1 | bulan | 1200000 | unit Pertanian`\n"
-        "`rekap bulan ini`\n\n"
+        "📋 Contoh siap salin dikirim sebagai pesan terpisah setelah panduan ini.\n\n"
         "Alias: `penj` / `jual` = pemasukan; `pembelian` / `beli` / `pemb` = pengeluaran.\n\n"
         "🧾 *PEMBELIAN / PENGELUARAN*\nFormat: `pemb [nama barang/jasa] | [keterangan] | [kuantitas] | [satuan] | [harga satuan] | unit [unit usaha]`.\n"
         "Kategori: listrik, UHK, penyusutan, konsumsi dapur, dan PDAM.\n"
@@ -605,3 +602,11 @@ def handle_help_command(message: str) -> str | None:
         "👥 *3. FITUR KARYAWAN*\nKetik `help karyawan` untuk panduan karyawan, presensi, dan penggajian.\n"
         "━━━━━━━━━━━━━━━━━━"
     )
+
+
+def help_copy_messages() -> list[str]:
+    return [
+        "penj telur ayam | jual ke warung | 10 | butir | 1500",
+        "pemb listrik | tagihan November | 1 | bulan | 1200000 | unit Pertanian",
+        "rekap bulan ini",
+    ]

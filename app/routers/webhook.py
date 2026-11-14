@@ -12,6 +12,17 @@ from app.services.setup_service import init_all_sheets # Import fungsi di atas
 
 router = APIRouter()
 
+
+def _send_help_reply(sender: str, guide: str, copy_messages: list[str]) -> bool:
+    if not send_whatsapp(sender, guide):
+        return False
+    if copy_messages and not send_whatsapp(sender, "📋 *PESAN SIAP DISALIN*"):
+        return False
+    for copy_message in copy_messages:
+        if not send_whatsapp(sender, copy_message):
+            return False
+    return True
+
 # setup
 @router.get("/setup")
 def setup_database():
@@ -128,7 +139,12 @@ def process_webhook_payload(data: dict) -> dict:
 
         employee_reply = karyawan_service.handle_karyawan(message, sender)
         if employee_reply is not None:
-            send_whatsapp(sender, employee_reply)
+            copy_messages = (
+                karyawan_service.help_copy_messages(admin=staff)
+                if karyawan_service.is_help_command(message, admin=staff)
+                else []
+            )
+            _send_help_reply(sender, employee_reply, copy_messages)
             webhook_state.log_event(sender, message, "KARYAWAN_QUERY")
             return {"status": "karyawan"}
 
@@ -146,7 +162,7 @@ def process_webhook_payload(data: dict) -> dict:
 
         help_reply = sales_service.handle_help_command(message)
         if help_reply is not None:
-            sent = send_whatsapp(sender, help_reply)
+            sent = _send_help_reply(sender, help_reply, sales_service.help_copy_messages())
             webhook_state.log_event(
                 sender,
                 message,

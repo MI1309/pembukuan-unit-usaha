@@ -551,12 +551,7 @@ def _help_text(admin: bool) -> str:
         "• `presensi saya` → Rekap presensi bulan ini",
         "• `slip gaji` / `slip gaji 2026-10` → Slip gaji sendiri",
         "• `cek data saya` → Lihat profil pribadi",
-        "", "📋 *SALIN & KIRIM PESAN*",
-        "`masuk`",
-        "`pulang`",
-        "`izin acara keluarga`",
-        "`presensi saya`",
-        "`slip gaji`",
+        "📋 Contoh siap salin dikirim sebagai pesan terpisah setelah panduan ini.",
     ]
     if admin:
         lines += [
@@ -593,6 +588,30 @@ def _help_text(admin: bool) -> str:
     return "\n".join(lines)
 
 
+def is_help_command(message: str, admin: bool = False) -> bool:
+    text = re.sub(r"\s+", " ", str(message or "").strip())
+    if re.fullmatch(r"(help|menu|bantuan|panduan)\s+karyawan", text, re.I):
+        return True
+    return not admin and re.fullmatch(r"(help|menu|bantuan|panduan|\?|halo|hai|hi)", text, re.I) is not None
+
+
+def help_copy_messages(admin: bool = False) -> list[str]:
+    if admin:
+        return [
+            "masuk 001",
+            "pulang 001",
+            "presensi 001 izin alasan",
+            "slip gaji 001",
+        ]
+    return [
+        "masuk",
+        "pulang",
+        "izin acara keluarga",
+        "presensi saya",
+        "slip gaji",
+    ]
+
+
 def _resolve_target(nik: str | None, admin: bool, self_employee: dict | None) -> tuple[dict | None, str | None]:
     if nik:
         employee = get_karyawan(nik)
@@ -617,9 +636,7 @@ def handle_karyawan(message: str, sender: str) -> str | None:
         return add_karyawan(original) if admin else MSG_ADMIN_ONLY
 
     text = re.sub(r"\s+", " ", original).strip()
-    if re.match(r"^(help|menu|bantuan|panduan)\s+karyawan$", text, re.I) or (
-        not admin and re.match(r"^(help|menu|bantuan|panduan|\?|halo|hai|hi)$", text, re.I)
-    ):
+    if is_help_command(text, admin):
         return _help_text(admin)
     if re.match(r"^(form|template)\s+karyawan$", text, re.I):
         return add_karyawan("") if admin else MSG_ADMIN_ONLY

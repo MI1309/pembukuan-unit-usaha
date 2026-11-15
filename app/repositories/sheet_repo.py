@@ -45,7 +45,7 @@ def _find_existing_transaction_ids(sheet_names, transaction_ids):
     for sheet_name in sheet_names:
         worksheet = get_sheet(sheet_name, create=False)
         if worksheet:
-            values = _retry_google_call(worksheet.get_all_values)
+            
             found.update(transaction_ids.intersection(
                 str(value).strip()
                 for row in values
@@ -139,7 +139,7 @@ def _cached_get_all_values(worksheet):
         _record_cache[cache_key] = {"timestamp": now, "values": values}
         return values
 
-    values = _retry_google_call(worksheet.get_all_values)
+    
     if not values:
         return False
 
@@ -702,7 +702,7 @@ def get_all_records_many(sheet_names: list[str]) -> dict[str, list[dict]]:
             if len(uncached_names) == 1:
                 name = uncached_names[0]
                 worksheet = get_sheet(name, create=False)
-                values = _retry_google_call(worksheet.get_all_values) if worksheet else []
+                 if worksheet else []
                 value_sets = [(name, values)]
             else:
                 ranges = [_a1_column_range(name) for name in uncached_names]
@@ -737,7 +737,7 @@ def find_transaction_ids(sheet_names: list[str], tx_ids: list[str]) -> dict[str,
         worksheet = get_sheet(sheet_name, create=False)
         if not worksheet:
             continue
-        values = _retry_google_call(worksheet.get_all_values)
+        
         header_index = next(
             (index for index, row in enumerate(values)
              if any(str(value).strip().casefold() == "transaction id" for value in row)),
@@ -757,7 +757,7 @@ def find_transaction_ids(sheet_names: list[str], tx_ids: list[str]) -> dict[str,
 
 
 def _transaction_id_column(worksheet, header_row_number):
-    values = _retry_google_call(worksheet.get_all_values)
+    
     header_index = header_row_number - 1
     while len(values) <= header_index:
         values.append([])

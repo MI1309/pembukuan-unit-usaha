@@ -35,8 +35,44 @@ class ArchiveVerificationError(RuntimeError):
         self.extra_ids = sorted(extra_ids or [])
 
 
+class SheetRangeError(Exception):
+    """Raised when a Google Sheets API call fails because a sheet or range is
+    invalid/missing.  Carries a human-readable *hint* suitable for operator
+    notifications."""
+    def __init__(self, sheet: str, range_: str, hint: str):
+        super().__init__(hint)
+        self.sheet = sheet
+        self.range_ = range_
+        self.hint = hint
+
+
+# Headers for _ArsipTransaksi — kept in sync with setup_reference_structure.SPECS
+ARSIP_HEADERS: list[str] = [
+    "Unit Usaha", "Nomor", "Tanggal", "Nama Barang/Jasa/Produk",
+    "Keterangan", "Kuantitas", "Satuan", "Pemasukan (Rp)",
+    "Pengeluaran (Rp)", "Saldo", "Diarsipkan", "Transaction ID",
+]
+
+
 def _retry_google_call(operation, *args, **kwargs):
     return retry_google_api()(operation)(*args, **kwargs)
+
+
+def _quote_sheet_name(name: str) -> str:
+    """Return a safely-quoted sheet name for use in A1 notation ranges.
+
+    Names that are purely ``[A-Za-z_][A-Za-z0-9_]*`` need no quoting.
+    Everything else is wrapped in single-quotes with any embedded single-quote
+    doubled (per Google Sheets A1-notation rules).
+
+    Examples::
+        _quote_sheet_name("_ArsipTransaksi")           -> "_ArsipTransaksi"
+        _quote_sheet_name("(2)Rincian Transaksi")      -> "'(2)Rincian Transaksi'"
+        _quote_sheet_name("O'Brien's Report")          -> "'O''Brien''s Report'"
+    """
+    if _SIMPLE_SHEET_NAME.fullmatch(name):
+        return name
+    return "'" + name.replace("'", "''") + "'"
 
 
 def _find_existing_transaction_ids(sheet_names, transaction_ids):
@@ -293,6 +329,61 @@ def get_sheet(name: str, create=True):
 def invalidate_cache(sheet_name: str) -> None:
     with _cache_lock:
         _record_cache.pop(sheet_name, None)
+
+
+def _ensure_sheet_exists(name: str, headers: list[str]):
+    """Return the named worksheet, auto-creating it with *headers* if missing.
+
+    If the sheet does not exist it will be created, headers written to row 1,
+    and row 1 frozen.  A WARNING is logged so operators know auto-creation
+    happened.  Also ensures the sheet has at least ``len(headers)`` columns.
+
+    Args:
+        name: Worksheet title.
+        headers: List of column header strings to write on row 1 when creating.
+
+    Returns:
+        A gspread Worksheet object (never None).
+
+    Raises:
+        SheetRangeError: Wraps any unexpected API error with an actionable hint.
+    """
+    try:
+        worksheet = get_sheet(name, create=False)
+        if worksheet is None:
+            logger.warning("SHEET_AUTOCREATED:%s — criando worksheet ausente", name)
+            worksheet = get_sheet(name, create=True)
+            end_col = _column_name(len(headers))
+            _retry_google_call(
+                worksheet.update,
+                range_name=f"A1:{end_col}1",
+                values=[headers],
+            )
+            _retry_google_call(worksheet.freeze, rows=1)
+            # Invalidate cached None so subsequent lookups hit the new sheet
+            with _cache_lock:
+                _worksheet_cache[name] = worksheet
+
+        # Ensure column count is sufficient
+        if hasattr(worksheet, "col_count") and worksheet.col_count < len(headers):
+            needed = len(headers) - worksheet.col_count
+            _retry_google_call(worksheet.add_cols, needed)
+
+        return worksheet
+    except gspread.exceptions.APIError as exc:
+        status = getattr(exc, "response", None)
+        code = status.status_code if status else 0
+        if code == 400:
+            raise SheetRangeError(
+                sheet=name,
+                range_=f"{name}!A:Z",
+                hint=(
+                    f"Sheet '{name}' tidak ditemukan atau strukturnya kosong. "
+                    "Jalankan `python -m app.setup_reference_structure --apply` "
+                    "atau periksa nama sheet di spreadsheet."
+                ),
+            ) from exc
+        raise
 
 def append_row(sheet_name: str, row: list):
     sheet = get_sheet(sheet_name)
@@ -682,8 +773,7 @@ def _records_from_values(values: list[list]) -> list[dict]:
 
 
 def _a1_column_range(sheet_name: str) -> str:
-    sheet_reference = sheet_name if _SIMPLE_SHEET_NAME.fullmatch(sheet_name) else f"'{sheet_name.replace(chr(39), chr(39) * 2)}'"
-    return f"{sheet_reference}!A:Z"
+    return f"{_quote_sheet_name(sheet_name)}!A:Z"
 
 
 def get_all_records_many(sheet_names: list[str]) -> dict[str, list[dict]]:
@@ -853,8 +943,28 @@ def _log_archive_verification_failure(archived_at, missing_ids, extra_ids, error
         logger.warning("Unable to persist archive verification failure log error_type=%s", type(logging_error).__name__)
 
 
-def archive_unit_transactions(rows_by_unit: dict[str, list[tuple[int, list]]], archived_at: str) -> int:
-    archive = get_sheet("_ArsipTransaksi")
+def archive_unit_transactions(
+    rows_by_unit: dict[str, list[tuple[int, list]]],
+    archived_at: str,
+) -> dict:
+    """Archive ledger rows from multiple unit sheets to *_ArsipTransaksi*.
+
+    Changes from previous version
+    ------------------------------
+    * Uses ``_ensure_sheet_exists`` so ``_ArsipTransaksi`` is auto-created when
+      missing (no more APIError 400 on first month-rollover).
+    * Per-unit try/except: a failure on one unit does **not** prevent other units
+      from being archived, and does **not** delete that unit's source rows.
+    * Returns a structured dict instead of a bare ``int``.
+
+    Returns:
+        {
+            "archived":       {unit: row_count},   # units successfully archived
+            "failed":         {unit: error_msg},   # units that raised an error
+            "skipped_delete": [unit, ...],          # units whose source rows were NOT deleted
+        }
+    """
+    archive = _ensure_sheet_exists("_ArsipTransaksi", ARSIP_HEADERS)
     archive_id_column, archive_values_before = _transaction_id_column(archive, 1)
     archive_headers = archive_values_before[0] if archive_values_before else []
     archived_at_column = next(
@@ -867,112 +977,118 @@ def archive_unit_transactions(rows_by_unit: dict[str, list[tuple[int, list]]], a
         for row in archive_values_before[1:]
         if _row_transaction_id(row, archive_id_column)
     }
-    archived_rows = []
-    source_ids_by_unit = {}
-    source_sheets = {}
-    delete_rows_by_unit = {}
+
+    result: dict = {"archived": {}, "failed": {}, "skipped_delete": []}
+
     for unit, rows in rows_by_unit.items():
-        source = get_sheet(unit, create=False)
-        if not source:
-            error = ArchiveVerificationError(f"Worksheet sumber tidak ditemukan: {unit}")
-            _log_archive_verification_failure(archived_at, [], [], error)
-            raise error
-        source_id_column, source_values = _transaction_id_column(source, 2)
-        source_sheets[unit] = source
-        unit_ids = []
-        delete_rows = []
-        for row_number, provided_row in rows:
-            current_row = source_values[row_number - 1] if row_number - 1 < len(source_values) else []
-            if [str(value) for value in current_row] != [str(value) for value in provided_row]:
-                error = ArchiveVerificationError(f"Baris sumber berubah: {unit} row {row_number}")
-                _log_archive_verification_failure(archived_at, [], [], error)
-                raise error
-            values = list(current_row[:9]) + [""] * max(0, 9 - len(current_row))
-            transaction_id = _row_transaction_id(current_row, source_id_column)
-            if not transaction_id:
-                transaction_id = _legacy_row_transaction_id(unit, row_number, values)
-                _retry_google_call(source.update_cell, row_number, source_id_column + 1, transaction_id)
-                while len(current_row) <= source_id_column:
-                    current_row.append("")
-                current_row[source_id_column] = transaction_id
-                source_values[row_number - 1] = current_row
-            unit_ids.append(transaction_id)
-            delete_rows.append((row_number, list(current_row)))
-            archived_rows.append([unit, *values, archived_at, transaction_id])
-        source_ids_by_unit[unit] = unit_ids
-        delete_rows_by_unit[unit] = delete_rows
-    if archived_rows:
-        requested_ids = [transaction_id for ids in source_ids_by_unit.values() for transaction_id in ids]
-        existing_ids = find_transaction_ids(["_ArsipTransaksi"], requested_ids)
-        rows_to_append = [row for row in archived_rows if not existing_ids.get(row[-1])]
-        append_error = None
-        if rows_to_append:
-            try:
-                _safe_append(
-                    lambda: archive.append_rows(rows_to_append, value_input_option="USER_ENTERED"),
-                    rows_to_append,
-                    ["_ArsipTransaksi"],
-                    "archive_unit_transactions_append",
+        try:
+            source = get_sheet(unit, create=False)
+            if not source:
+                raise ValueError(f"Worksheet sumber tidak ditemukan: {unit}")
+
+            source_id_column, source_values = _transaction_id_column(source, 2)
+            unit_ids: list[str] = []
+            delete_rows: list[tuple[int, list]] = []
+            archived_rows: list[list] = []
+
+            for row_number, provided_row in rows:
+                current_row = source_values[row_number - 1] if row_number - 1 < len(source_values) else []
+                if [str(v) for v in current_row] != [str(v) for v in provided_row]:
+                    raise ArchiveVerificationError(
+                        f"Baris sumber berubah: {unit} row {row_number}"
+                    )
+                padded = list(current_row[:9]) + [""] * max(0, 9 - len(current_row))
+                transaction_id = _row_transaction_id(current_row, source_id_column)
+                if not transaction_id:
+                    transaction_id = _legacy_row_transaction_id(unit, row_number, padded)
+                    _retry_google_call(source.update_cell, row_number, source_id_column + 1, transaction_id)
+                    while len(current_row) <= source_id_column:
+                        current_row.append("")
+                    current_row[source_id_column] = transaction_id
+                    source_values[row_number - 1] = current_row
+                unit_ids.append(transaction_id)
+                delete_rows.append((row_number, list(current_row)))
+                archived_rows.append([unit, *padded, archived_at, transaction_id])
+
+            if archived_rows:
+                existing_ids = find_transaction_ids(["_ArsipTransaksi"], unit_ids)
+                rows_to_append = [row for row in archived_rows if not existing_ids.get(row[-1])]
+                if rows_to_append:
+                    _safe_append(
+                        lambda r=rows_to_append: archive.append_rows(r, value_input_option="USER_ENTERED"),
+                        rows_to_append,
+                        ["_ArsipTransaksi"],
+                        f"archive_unit_transactions_append:{unit}",
+                    )
+
+                # Verifikasi post-append dengan retry (Google Sheets eventual-consistent)
+                expected_ids = set(unit_ids)
+                found_ids: set[str] = set()
+                archive_values_after: list = []
+                missing_ids = expected_ids
+                for _attempt in range(4):
+                    if _attempt > 0:
+                        sleep(3)
+                    archive_values_after = _retry_google_call(archive.get_all_values)
+                    found_ids = set()
+                    for row in archive_values_after[1:]:
+                        tx = _row_transaction_id(row, archive_id_column)
+                        av = str(row[archived_at_column]).strip() if archived_at_column < len(row) else ""
+                        ru = str(row[0]) if row else ""
+                        if av == archived_at and ru == unit:
+                            found_ids.add(tx)
+                    missing_ids = expected_ids - found_ids
+                    if not missing_ids:
+                        break
+
+                if missing_ids:
+                    _log_archive_verification_failure(archived_at, missing_ids, set(), None)
+                    raise ArchiveVerificationError(
+                        f"Verifikasi arsip gagal untuk unit {unit} pada {archived_at}",
+                        missing_ids,
+                    )
+
+                added_ids = {
+                    _row_transaction_id(row, archive_id_column)
+                    for row in archive_values_after[1:]
+                    if _row_transaction_id(row, archive_id_column)
+                    and _row_transaction_id(row, archive_id_column) not in before_ids
+                }
+                extra_ids = added_ids - expected_ids
+                if extra_ids:
+                    logger.warning(
+                        "ARCHIVE_EXTRA_IDS unit=%s archived_at=%s extra=%s",
+                        unit, archived_at, sorted(extra_ids),
+                    )
+
+                verified_at = datetime.now().astimezone().isoformat()
+                _write_archive_manifest(
+                    f"archive_manifest:{archived_at}",
+                    {unit: {
+                        "count": len(unit_ids),
+                        "tx_ids_hash": _transaction_ids_hash(set(unit_ids)),
+                        "verified_at": verified_at,
+                    }},
                 )
-            except Exception as error:
-                append_error = error
 
-        # Verifikasi post-append: retry beberapa kali karena Google Sheets
-        # butuh waktu untuk commit setelah append_rows (race condition)
-        expected_by_unit = {unit: set(ids) for unit, ids in source_ids_by_unit.items()}
-        all_expected_ids = set().union(*expected_by_unit.values()) if expected_by_unit else set()
-        found_ids_by_unit = {unit: set() for unit in rows_by_unit}
-        archive_values_after: list = []
-        missing_ids: set = all_expected_ids
-        for _attempt in range(4):
-            if _attempt > 0:
-                sleep(3)
-            archive_values_after = _retry_google_call(archive.get_all_values)
-            found_ids_by_unit = {unit: set() for unit in rows_by_unit}
-            for row in archive_values_after[1:]:
-                transaction_id = _row_transaction_id(row, archive_id_column)
-                archived_value = str(row[archived_at_column]).strip() if archived_at_column < len(row) else ""
-                unit = str(row[0]) if row else ""
-                if archived_value == archived_at and unit in found_ids_by_unit:
-                    found_ids_by_unit[unit].add(transaction_id)
-            missing_ids = set().union(*(
-                expected_by_unit[unit] - found_ids_by_unit[unit] for unit in expected_by_unit
-            ))
-            if not missing_ids and not append_error:
-                break
+                # Hapus baris sumber hanya jika arsip sukses
+                for row_number, row_values in reversed(delete_rows):
+                    _safe_delete_rows(source, row_number, row_values)
+                invalidate_cache(unit)
 
-        added_ids = {
-            _row_transaction_id(row, archive_id_column)
-            for row in archive_values_after[1:]
-            if _row_transaction_id(row, archive_id_column)
-            and _row_transaction_id(row, archive_id_column) not in before_ids
-        }
-        extra_ids = added_ids - all_expected_ids
-        if missing_ids or extra_ids or append_error:
-            _log_archive_verification_failure(archived_at, missing_ids, extra_ids, append_error)
-            raise ArchiveVerificationError(
-                f"Verifikasi arsip gagal untuk {archived_at}", missing_ids, extra_ids
+            result["archived"][unit] = len(archived_rows)
+
+        except Exception as exc:
+            error_msg = str(exc)
+            logger.error(
+                "ARCHIVE_FAILED unit=%s archived_at=%s error_type=%s error=%s",
+                unit, archived_at, type(exc).__name__, error_msg,
             )
+            result["failed"][unit] = error_msg
+            result["skipped_delete"].append(unit)
 
-        verified_at = datetime.now().astimezone().isoformat()
-        manifest = {
-            unit: {
-                "count": len(ids),
-                "tx_ids_hash": _transaction_ids_hash(set(ids)),
-                "verified_at": verified_at,
-            }
-            for unit, ids in source_ids_by_unit.items()
-        }
-        _write_archive_manifest(f"archive_manifest:{archived_at}", manifest)
-
-        for unit, rows in rows_by_unit.items():
-            worksheet = source_sheets[unit]
-            for row_number, row_values in reversed(delete_rows_by_unit[unit]):
-                _safe_delete_rows(worksheet, row_number, row_values)
-            invalidate_cache(unit)
     invalidate_cache("_ArsipTransaksi")
-    return len(archived_rows)
-
+    return result
 
 def verify_archive_manifest(manifest_key: str) -> dict:
     manifest = _read_archive_manifest(manifest_key)

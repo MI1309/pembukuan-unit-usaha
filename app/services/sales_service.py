@@ -140,10 +140,16 @@ def _maybe_archive_unit_transactions(sale_date: date) -> None:
         if rows:
             rows_by_unit[unit] = rows
     if rows_by_unit:
-        sheet_repo.archive_unit_transactions(
+        result = sheet_repo.archive_unit_transactions(
             rows_by_unit,
             now_tz().strftime("%Y-%m-%d %H:%M:%S"),
         )
+        if result.get("failed"):
+            # Log but do not raise — archive failures are non-blocking
+            import logging
+            logging.getLogger(__name__).warning(
+                "ARCHIVE_PARTIAL_FAILURE failed_units=%s", list(result["failed"].keys())
+            )
 
 
 def _maybe_archive_daily_detail(sale_date: date) -> None:

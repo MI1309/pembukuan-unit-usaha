@@ -7,7 +7,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from threading import RLock
 from gspread.utils import numericise
-from time import monotonic
+from time import monotonic, sleep
 
 from app.config import config
 from app.core.utils import parse_amount
@@ -917,26 +917,36 @@ def archive_unit_transactions(rows_by_unit: dict[str, list[tuple[int, list]]], a
             except Exception as error:
                 append_error = error
 
-        archive_values_after = _retry_google_call(archive.get_all_values)
-        found_ids_by_unit = {unit: set() for unit in rows_by_unit}
-        for row in archive_values_after[1:]:
-            transaction_id = _row_transaction_id(row, archive_id_column)
-            archived_value = str(row[archived_at_column]).strip() if archived_at_column < len(row) else ""
-            unit = str(row[0]) if row else ""
-            if archived_value == archived_at and unit in found_ids_by_unit:
-                found_ids_by_unit[unit].add(transaction_id)
-
+        # Verifikasi post-append: retry beberapa kali karena Google Sheets
+        # butuh waktu untuk commit setelah append_rows (race condition)
         expected_by_unit = {unit: set(ids) for unit, ids in source_ids_by_unit.items()}
-        missing_ids = set().union(*(
-            expected_by_unit[unit] - found_ids_by_unit[unit] for unit in expected_by_unit
-        ))
+        all_expected_ids = set().union(*expected_by_unit.values()) if expected_by_unit else set()
+        found_ids_by_unit = {unit: set() for unit in rows_by_unit}
+        archive_values_after: list = []
+        missing_ids: set = all_expected_ids
+        for _attempt in range(4):
+            if _attempt > 0:
+                sleep(3)
+            archive_values_after = _retry_google_call(archive.get_all_values)
+            found_ids_by_unit = {unit: set() for unit in rows_by_unit}
+            for row in archive_values_after[1:]:
+                transaction_id = _row_transaction_id(row, archive_id_column)
+                archived_value = str(row[archived_at_column]).strip() if archived_at_column < len(row) else ""
+                unit = str(row[0]) if row else ""
+                if archived_value == archived_at and unit in found_ids_by_unit:
+                    found_ids_by_unit[unit].add(transaction_id)
+            missing_ids = set().union(*(
+                expected_by_unit[unit] - found_ids_by_unit[unit] for unit in expected_by_unit
+            ))
+            if not missing_ids and not append_error:
+                break
+
         added_ids = {
             _row_transaction_id(row, archive_id_column)
             for row in archive_values_after[1:]
             if _row_transaction_id(row, archive_id_column)
             and _row_transaction_id(row, archive_id_column) not in before_ids
         }
-        all_expected_ids = set().union(*expected_by_unit.values()) if expected_by_unit else set()
         extra_ids = added_ids - all_expected_ids
         if missing_ids or extra_ids or append_error:
             _log_archive_verification_failure(archived_at, missing_ids, extra_ids, append_error)

@@ -7,6 +7,7 @@ from gspread.utils import numericise
 from time import monotonic
 
 from app.config import config
+from app.core.retry import retry_google_api, safe_append_with_idempotency
 
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive"]
 creds = None
@@ -18,6 +19,57 @@ _record_cache = {}
 _cache_lock = RLock()
 _READ_CACHE_SECONDS = 3
 _SIMPLE_SHEET_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_TRANSACTION_ID = re.compile(r"^\d{8}-[A-Z]{3}-[A-Fa-f0-9]{8}$")
+
+
+def _retry_google_call(operation, *args, **kwargs):
+    return retry_google_api()(operation)(*args, **kwargs)
+
+
+def _find_existing_transaction_ids(sheet_names, transaction_ids):
+    transaction_ids = set(transaction_ids)
+    found = set()
+    for sheet_name in sheet_names:
+        worksheet = get_sheet(sheet_name, create=False)
+        if worksheet:
+            values = _retry_google_call(worksheet.get_all_values)
+            found.update(transaction_ids.intersection(
+                str(value).strip()
+                for row in values
+                for value in row
+            ))
+    return found
+
+
+def _transaction_ids_in_rows(rows):
+    return {
+        str(row[-1]).strip()
+        for row in rows
+        if row and isinstance(row[-1], str) and _TRANSACTION_ID.fullmatch(row[-1].strip())
+    }
+
+
+def _safe_append(operation, rows, sheet_names, operation_name):
+    transaction_ids = _transaction_ids_in_rows(rows)
+    return safe_append_with_idempotency(
+        operation,
+        transaction_ids,
+        lambda ids: _find_existing_transaction_ids(sheet_names, ids),
+        operation_name=operation_name,
+    )
+
+
+def _safe_delete_rows(worksheet, row_number, expected_values=None):
+    if expected_values is None:
+        expected_values = _retry_google_call(worksheet.row_values, row_number)
+
+    def delete_if_unchanged():
+        current_values = _retry_google_call(worksheet.row_values, row_number)
+        if current_values != expected_values:
+            return
+        return worksheet.delete_rows(row_number)
+
+    return _retry_google_call(delete_if_unchanged)
 
 
 def get_client():
@@ -30,6 +82,7 @@ def get_client():
     return client
 
 
+@retry_google_api()
 def get_spreadsheet():
     global _spreadsheet
     if _spreadsheet is None:
@@ -47,7 +100,7 @@ def get_sheet(name: str, create=True):
 
         spreadsheet = get_spreadsheet()
         try:
-            worksheet = spreadsheet.worksheet(name)
+            worksheet = _retry_google_call(spreadsheet.worksheet, name)
         except gspread.exceptions.WorksheetNotFound:
             worksheet = spreadsheet.add_worksheet(title=name, rows=1000, cols=20) if create else None
         if worksheet is not None:
@@ -61,7 +114,7 @@ def invalidate_cache(sheet_name: str) -> None:
 
 def append_row(sheet_name: str, row: list):
     sheet = get_sheet(sheet_name)
-    sheet.append_row(row)
+    _safe_append(lambda: sheet.append_row(row), [row], [sheet_name], f"append_row:{sheet_name}")
     invalidate_cache(sheet_name)
 
 
@@ -147,14 +200,22 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
                 }
             })
 
-    spreadsheet.batch_update({"requests": requests})
+    _safe_append(
+        lambda: spreadsheet.batch_update({"requests": requests}),
+        [values for rows in rows_by_name.values() for values in rows],
+        list(rows_by_name),
+        "append_rows_atomically",
+    )
     for sheet_name in rows_by_name:
         invalidate_cache(sheet_name)
 
 
 def _format_daily_archive(worksheet) -> None:
     sheet_id = worksheet.id
-    metadata = worksheet.spreadsheet.fetch_sheet_metadata(params={"includeGridData": False})
+    metadata = _retry_google_call(
+        worksheet.spreadsheet.fetch_sheet_metadata,
+        params={"includeGridData": False},
+    )
     sheet_metadata = next(
         sheet for sheet in metadata.get("sheets", [])
         if sheet.get("properties", {}).get("sheetId") == sheet_id
@@ -320,7 +381,7 @@ def _format_daily_archive(worksheet) -> None:
             "fields": "pixelSize",
         }
     } for column, width in enumerate(widths))
-    worksheet.spreadsheet.batch_update({"requests": requests})
+    _retry_google_call(worksheet.spreadsheet.batch_update, {"requests": requests})
 
 
 def archive_daily_detail(archive_month: str, rows: list[list], new_period_label: str) -> int:
@@ -332,8 +393,9 @@ def archive_daily_detail(archive_month: str, rows: list[list], new_period_label:
         "Bulan Arsip", "Tanggal", "Nama Produk /Jasa/ Barang", "Keterangan Transaksi",
         "Kuantitas", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)",
     ]
-    if not archive.get("1:1") or not any(str(value).strip() for value in archive.get("1:1")[0]):
-        archive.update(range_name="A1:H1", values=[archive_headers])
+    archive_header = _retry_google_call(archive.get, "1:1")
+    if not archive_header or not any(str(value).strip() for value in archive_header[0]):
+        _retry_google_call(archive.update, range_name="A1:H1", values=[archive_headers])
 
     archived_rows = [
         [archive_month, *(row[:7] + [""] * max(0, 7 - len(row)))]
@@ -341,13 +403,16 @@ def archive_daily_detail(archive_month: str, rows: list[list], new_period_label:
         if any(str(value).strip() for value in row)
     ]
     if archived_rows:
-        archive.append_rows(archived_rows)
+        _safe_append(
+            lambda: archive.append_rows(archived_rows), archived_rows,
+            ["_ArsipRincianHarian"], "archive_daily_detail_append",
+        )
     _format_daily_archive(archive)
 
-    while len(source.get_all_values()) > 5:
-        source.delete_rows(6)
+    while len(_retry_google_call(source.get_all_values)) > 5:
+        _safe_delete_rows(source, 6)
 
-    source.update(range_name="A3", values=[[new_period_label]])
+    _retry_google_call(source.update, range_name="A3", values=[[new_period_label]])
     invalidate_cache("(2)Rincian Transaksi Harian")
     invalidate_cache("_ArsipRincianHarian")
     return len(archived_rows)
@@ -358,14 +423,14 @@ def update_cell(sheet_name: str, row: int, column: int, value):
     sheet = get_sheet(sheet_name, create=False)
     if not sheet:
         raise ValueError(f"Worksheet not found: {sheet_name}")
-    sheet.update_cell(row, column, value)
+    _retry_google_call(sheet.update_cell, row, column, value)
     invalidate_cache(sheet_name)
 
 def delete_row(sheet_name: str, row: int):
     sheet = get_sheet(sheet_name, create=False)
     if not sheet:
         return
-    sheet.delete_rows(row)
+    _safe_delete_rows(sheet, row)
     invalidate_cache(sheet_name)
 
 def get_drive_access_token() -> str:
@@ -375,7 +440,7 @@ def get_drive_access_token() -> str:
 def get_sales_data():
     sheet = get_sheet("Rincian Penjualan", create=False)
     if not sheet: return []
-    return sheet.get_all_records()
+    return _retry_google_call(sheet.get_all_records)
 
 def _records_from_values(values: list[list]) -> list[dict]:
     if not values:
@@ -440,11 +505,15 @@ def get_all_records_many(sheet_names: list[str]) -> dict[str, list[dict]]:
             if len(uncached_names) == 1:
                 name = uncached_names[0]
                 worksheet = get_sheet(name, create=False)
-                values = worksheet.get_all_values() if worksheet else []
+                values = _retry_google_call(worksheet.get_all_values) if worksheet else []
                 value_sets = [(name, values)]
             else:
                 ranges = [_a1_column_range(name) for name in uncached_names]
-                response = get_spreadsheet().values_batch_get(ranges, params={"majorDimension": "ROWS"})
+                response = _retry_google_call(
+                    get_spreadsheet().values_batch_get,
+                    ranges,
+                    params={"majorDimension": "ROWS"},
+                )
                 value_sets = [
                     (name, value_range.get("values", []))
                     for name, value_range in zip(uncached_names, response.get("valueRanges", []))
@@ -472,11 +541,16 @@ def archive_unit_transactions(rows_by_unit: dict[str, list[tuple[int, list]]], a
             values = list(row[:9]) + [""] * max(0, 9 - len(row))
             archived_rows.append([unit, *values, archived_at])
     if archived_rows:
-        archive.append_rows(archived_rows, value_input_option="USER_ENTERED")
+        _safe_append(
+            lambda: archive.append_rows(archived_rows, value_input_option="USER_ENTERED"),
+            archived_rows,
+            ["_ArsipTransaksi"],
+            "archive_unit_transactions_append",
+        )
         for unit, rows in rows_by_unit.items():
             worksheet = get_sheet(unit, create=False)
-            for row_number, _ in reversed(rows):
-                worksheet.delete_rows(row_number)
+            for row_number, row_values in reversed(rows):
+                _safe_delete_rows(worksheet, row_number, row_values)
             invalidate_cache(unit)
     invalidate_cache("_ArsipTransaksi")
     return len(archived_rows)

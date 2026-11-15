@@ -65,3 +65,14 @@ Thumbs.db
 # ==========================================
 *.log
 logs/
+
+# ==========================================
+# Dataset & Architecture Notes
+# ==========================================
+/contoh_pesan_dataset_semua_fitur.txt
+/data.txt
+/data_100.txt
+/dataset_testing_desember_2026.txt
+/dataset_testing_november_2026.txt
+/struktur_utama.txt
+/SAD.md

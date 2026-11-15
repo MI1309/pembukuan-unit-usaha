@@ -122,7 +122,23 @@ def _detect_header_row_index(sheet_name: str, values: list[list]) -> int:
     return 0
 
 
-def _ensure_transaction_id_header(worksheet):
+def _cached_get_all_values(worksheet):
+    """Return all values from *worksheet* using a short‑lived in‑memory cache.
+    The cache expires after :data:`_READ_CACHE_SECONDS` seconds to keep data
+    reasonably fresh while dramatically reducing repeated ``get_all_values``
+    calls that trigger Google Sheets read quota consumption.
+    """
+    now = monotonic()
+    cache_key = getattr(worksheet, "title", "unknown")
+    with _cache_lock:
+        entry = _record_cache.get(cache_key)
+        if entry and now - entry["timestamp"] < _READ_CACHE_SECONDS:
+            return entry["values"]
+        # Cache miss – fetch from API and store
+        values = _retry_google_call(worksheet.get_all_values)
+        _record_cache[cache_key] = {"timestamp": now, "values": values}
+        return values
+
     values = _retry_google_call(worksheet.get_all_values)
     if not values:
         return False
@@ -241,6 +257,23 @@ def get_spreadsheet():
     return _spreadsheet
 
 def get_sheet(name: str, create=True):
+    """Retrieve a worksheet, creating it if needed.
+    The result is cached in ``_worksheet_cache`` to avoid repeated API calls.
+    """
+    with _cache_lock:
+        if name in _worksheet_cache:
+            worksheet = _worksheet_cache[name]
+            if worksheet is not None or not create:
+                return worksheet
+
+        spreadsheet = get_spreadsheet()
+        try:
+            worksheet = _retry_google_call(spreadsheet.worksheet, name)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title=name, rows=1000, cols=20) if create else None
+        if worksheet is not None:
+            _worksheet_cache[name] = worksheet
+        return worksheet
     with _cache_lock:
         if name in _worksheet_cache:
             worksheet = _worksheet_cache[name]

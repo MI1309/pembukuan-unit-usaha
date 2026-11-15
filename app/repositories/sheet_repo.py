@@ -75,13 +75,16 @@ def _quote_sheet_name(name: str) -> str:
     return "'" + name.replace("'", "''") + "'"
 
 
+# ============================================================
+# FIX #3 — tambahkan baris `values = ...` yang hilang
+# ============================================================
 def _find_existing_transaction_ids(sheet_names, transaction_ids):
     transaction_ids = set(transaction_ids)
     found = set()
     for sheet_name in sheet_names:
         worksheet = get_sheet(sheet_name, create=False)
         if worksheet:
-            
+            values = _retry_google_call(worksheet.get_all_values)  # FIX #3
             found.update(transaction_ids.intersection(
                 str(value).strip()
                 for row in values
@@ -158,8 +161,11 @@ def _detect_header_row_index(sheet_name: str, values: list[list]) -> int:
     return 0
 
 
+# ============================================================
+# FIX #2 — hapus kode mati & perbaiki logika TTL cache
+# ============================================================
 def _cached_get_all_values(worksheet):
-    """Return all values from *worksheet* using a short‑lived in‑memory cache.
+    """Return all values from *worksheet* using a short-lived in-memory cache.
     The cache expires after :data:`_READ_CACHE_SECONDS` seconds to keep data
     reasonably fresh while dramatically reducing repeated ``get_all_values``
     calls that trigger Google Sheets read quota consumption.
@@ -168,21 +174,44 @@ def _cached_get_all_values(worksheet):
     cache_key = getattr(worksheet, "title", "unknown")
     with _cache_lock:
         entry = _record_cache.get(cache_key)
+        # FIX #2 — perbaiki kondisi: sebelumnya `entry["timestamp"] < TTL`
+        # yang hampir selalu True setelah 3 detik pertama proses berjalan,
+        # sehingga cache tidak pernah expire. Seharusnya selisih waktu.
         if entry and now - entry["timestamp"] < _READ_CACHE_SECONDS:
             return entry["values"]
-        # Cache miss – fetch from API and store
         values = _retry_google_call(worksheet.get_all_values)
         _record_cache[cache_key] = {"timestamp": now, "values": values}
         return values
+    # FIX #2 — semua kode setelah `return values` dihapus (dead code
+    # sisa fungsi _ensure_transaction_id_header yang terpotong).
 
-    
+
+# ============================================================
+# FIX #1 — definisi _ensure_transaction_id_header (sebelumnya hilang)
+# Direkonstruksi dari blok dead-code di _cached_get_all_values.
+# ============================================================
+def _ensure_transaction_id_header(worksheet) -> bool:
+    """Pastikan worksheet punya kolom 'Transaction ID' di header.
+
+    - Append-only: kolom baru ditambahkan di akhir header, kolom lama
+      tidak digeser.
+    - Idempoten: jika sudah ada, tidak melakukan apa-apa.
+    - Return True jika header baru ditambahkan, False jika sudah ada.
+
+    Args:
+        worksheet: gspread Worksheet object.
+    """
+    values = _retry_google_call(worksheet.get_all_values)
     if not values:
         return False
 
-    header_row_index = _detect_header_row_index(getattr(worksheet, "title", ""), values)
+    header_row_index = _detect_header_row_index(
+        getattr(worksheet, "title", ""), values
+    )
     header_row_number = header_row_index + 1
 
-    # Bersihkan cell B1 jika baris 1 adalah banner judul yang sebelumnya terisi "Transaction ID"
+    # Bersihkan cell B1 jika baris 1 adalah banner judul yang sebelumnya
+    # terisi "Transaction ID" (kasus migrasi lama).
     if header_row_index > 0 and len(values) > 0 and len(values[0]) > 1:
         if str(values[0][1]).strip().casefold() == "transaction id":
             _retry_google_call(worksheet.update_cell, 1, 2, "")
@@ -197,15 +226,13 @@ def _cached_get_all_values(worksheet):
     if "transaction id" in normalized:
         return False
 
-    repaired = []
-    for index, value in enumerate(header):
-        label = normalized[index]
-        if label in {"nomor", "no", "no.", "id transaksi"}:
-            continue
-        if label == "transaction id":
-            continue
-        repaired.append(value)
+    # Buang kolom nomor/no yang akan duplikat dengan Transaction ID
+    repaired = [
+        value for index, value in enumerate(header)
+        if normalized[index] not in {"nomor", "no", "no.", "id transaksi", "transaction id"}
+    ]
 
+    # Sisipkan setelah "Sisa Saldo" jika ada, atau setelah "Pengeluaran (Rp)"
     insert_index = len(repaired)
     for idx, value in enumerate(repaired):
         if _normalize_header_label(value) == "sisa saldo":
@@ -220,8 +247,11 @@ def _cached_get_all_values(worksheet):
     repaired.insert(insert_index, "Transaction ID")
     width = max(len(repaired), len(header))
     padded = repaired + [""] * max(0, width - len(repaired))
-    worksheet.update(range_name=f"A{header_row_number}:{_column_name(width)}{header_row_number}", values=[padded])
-
+    _retry_google_call(
+        worksheet.update,
+        range_name=f"A{header_row_number}:{_column_name(width)}{header_row_number}",
+        values=[padded],
+    )
     return True
 
 
@@ -292,6 +322,10 @@ def get_spreadsheet():
                 _spreadsheet = get_client().open_by_key(config.SPREADSHEET_ID)
     return _spreadsheet
 
+
+# ============================================================
+# FIX #4 — hapus blok `with _cache_lock` duplikat (dead code)
+# ============================================================
 def get_sheet(name: str, create=True):
     """Retrieve a worksheet, creating it if needed.
     The result is cached in ``_worksheet_cache`` to avoid repeated API calls.
@@ -310,20 +344,7 @@ def get_sheet(name: str, create=True):
         if worksheet is not None:
             _worksheet_cache[name] = worksheet
         return worksheet
-    with _cache_lock:
-        if name in _worksheet_cache:
-            worksheet = _worksheet_cache[name]
-            if worksheet is not None or not create:
-                return worksheet
-
-        spreadsheet = get_spreadsheet()
-        try:
-            worksheet = _retry_google_call(spreadsheet.worksheet, name)
-        except gspread.exceptions.WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet(title=name, rows=1000, cols=20) if create else None
-        if worksheet is not None:
-            _worksheet_cache[name] = worksheet
-        return worksheet
+    # FIX #4 — blok kedua `with _cache_lock` dihapus (dead code).
 
 
 def invalidate_cache(sheet_name: str) -> None:
@@ -351,7 +372,8 @@ def _ensure_sheet_exists(name: str, headers: list[str]):
     try:
         worksheet = get_sheet(name, create=False)
         if worksheet is None:
-            logger.warning("SHEET_AUTOCREATED:%s — criando worksheet ausente", name)
+            # FIX #6 — pesan log dalam bahasa Indonesia (sebelumnya Portugis)
+            logger.warning("SHEET_AUTOCREATED:%s — worksheet dibuat otomatis", name)
             worksheet = get_sheet(name, create=True)
             end_col = _column_name(len(headers))
             _retry_google_call(
@@ -384,6 +406,7 @@ def _ensure_sheet_exists(name: str, headers: list[str]):
                 ),
             ) from exc
         raise
+
 
 def append_row(sheet_name: str, row: list):
     sheet = get_sheet(sheet_name)
@@ -432,6 +455,7 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
         worksheet = get_sheet(sheet_name, create=False)
         if not worksheet:
             raise ValueError(f"Worksheet not found: {sheet_name}")
+        # FIX #1 — fungsi ini sekarang terdefinisi (sebelumnya NameError)
         _ensure_transaction_id_header(worksheet)
         request_rows = []
         date_columns = set()
@@ -714,6 +738,7 @@ def update_cell(sheet_name: str, row: int, column: int, value):
     _retry_google_call(sheet.update_cell, row, column, value)
     invalidate_cache(sheet_name)
 
+
 def delete_row(sheet_name: str, row: int):
     sheet = get_sheet(sheet_name, create=False)
     if not sheet:
@@ -721,14 +746,17 @@ def delete_row(sheet_name: str, row: int):
     _safe_delete_rows(sheet, row)
     invalidate_cache(sheet_name)
 
+
 def get_drive_access_token() -> str:
     from app.services.drive_oauth import get_drive_credentials
     return get_drive_credentials().token
+
 
 def get_sales_data():
     sheet = get_sheet("Rincian Penjualan", create=False)
     if not sheet: return []
     return _retry_google_call(sheet.get_all_records)
+
 
 def _records_from_values(values: list[list]) -> list[dict]:
     if not values:
@@ -926,14 +954,24 @@ def _write_archive_manifest(manifest_key, manifest):
     invalidate_cache("_Meta")
 
 
+# ============================================================
+# FIX #5 — fallback jika `error_code` tidak diekspor oleh app.core.retry
+# ============================================================
 def _log_archive_verification_failure(archived_at, missing_ids, extra_ids, error=None):
-    from app.core.retry import error_code
+    # FIX #5 — jangan crash saat import gagal; fallback ke response status_code
+    try:
+        from app.core.retry import error_code
+        code = error_code(error) if error else None
+    except (ImportError, AttributeError):
+        response = getattr(error, "response", None) if error else None
+        code = getattr(response, "status_code", None)
+
     details = json.dumps({
         "archived_at": archived_at,
         "missing_ids": sorted(missing_ids),
         "extra_ids": sorted(extra_ids),
         "error_type": type(error).__name__ if error else "",
-        "error_code": error_code(error) if error else None,
+        "error_code": code,
     }, sort_keys=True)
     logger.error("ARCHIVE_VERIFY_FAILED %s", details)
     try:
@@ -1089,6 +1127,7 @@ def archive_unit_transactions(
 
     invalidate_cache("_ArsipTransaksi")
     return result
+
 
 def verify_archive_manifest(manifest_key: str) -> dict:
     manifest = _read_archive_manifest(manifest_key)

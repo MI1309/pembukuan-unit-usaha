@@ -1,9 +1,7 @@
 import hashlib
 import json
 import logging
-import random
 import re
-import time
 from datetime import date, datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -61,32 +59,64 @@ def _retry_google_call(operation, *args, **kwargs):
 
 
 def _quote_sheet_name(name: str) -> str:
-    """Return a safely-quoted sheet name for use in A1 notation ranges.
-
-    Names that are purely ``[A-Za-z_][A-Za-z0-9_]*`` need no quoting.
-    Everything else is wrapped in single-quotes with any embedded single-quote
-    doubled (per Google Sheets A1-notation rules).
-
-    Examples::
-        _quote_sheet_name("_ArsipTransaksi")           -> "_ArsipTransaksi"
-        _quote_sheet_name("(2)Rincian Transaksi")      -> "'(2)Rincian Transaksi'"
-        _quote_sheet_name("O'Brien's Report")          -> "'O''Brien''s Report'"
-    """
+    """Return a safely-quoted sheet name for use in A1 notation ranges."""
     if _SIMPLE_SHEET_NAME.fullmatch(name):
         return name
     return "'" + name.replace("'", "''") + "'"
 
 
 # ============================================================
+# BATCH OPT #1 — helper untuk membaca banyak range dalam 1 request.
+# Google membatasi "request per menit", bukan "sel per menit".
+# 1 batchGet berisi N range tetap dihitung 1 request.
+# ============================================================
+def _batch_get_ranges(ranges: list[str]) -> dict[str, list[list]]:
+    """Baca banyak range A1 dalam SATU request ke Google Sheets.
+
+    Args:
+        ranges: List A1 notation, mis. ["(4)Ternak Ayam Fazza!A1:Z",
+                "(5)Ternak Ayam Emran!A1:Z"].
+
+    Returns:
+        dict: {range_name: values} — values = list of rows.
+
+    Menggunakan spreadsheets.values.batchGet agar N range = 1 request
+    (bukan N request terpisah). Ini sangat penting untuk kuota 60 req/menit.
+    """
+    if not ranges:
+        return {}
+    response = _retry_google_call(
+        get_spreadsheet().values_batch_get,
+        ranges,
+        params={"majorDimension": "ROWS"},
+    )
+    result = {}
+    for range_name, value_range in zip(ranges, response.get("valueRanges", [])):
+        result[range_name] = value_range.get("values", [])
+    return result
+
+
+def _batch_get_sheet_columns(sheet_names: list[str], column_letter: str) -> dict[str, list[str]]:
+    """Baca satu kolom dari banyak sheet dalam 1 request.
+
+    Mis. ambil kolom Transaction ID (kolom L) dari 5 unit sekaligus.
+    N sheet = 1 request.
+    """
+    if not sheet_names:
+        return {}
+    ranges = [f"{_quote_sheet_name(name)}!{column_letter}:{column_letter}" for name in sheet_names]
+    raw = _batch_get_ranges(ranges)
+    result = {}
+    for name, range_name in zip(sheet_names, ranges):
+        rows = raw.get(range_name, [])
+        result[name] = [row[0] if row else "" for row in rows]
+    return result
+
+
+# ============================================================
 # FIX #3 + OPT #3 — delegasi ke find_transaction_ids yang efisien
 # ============================================================
 def _find_existing_transaction_ids(sheet_names, transaction_ids):
-    """Cari transaction ID yang sudah ada di sheet.
-
-    OPT #3 — delegasi ke find_transaction_ids yang hanya membaca kolom
-    Transaction ID (bukan seluruh sheet). Menghindari duplikasi panggilan
-    baca dan mengurangi payload ~90%.
-    """
     found = find_transaction_ids(sheet_names, list(transaction_ids))
     return {tx_id for tx_id, sheets in found.items() if sheets}
 
@@ -161,23 +191,14 @@ def _detect_header_row_index(sheet_name: str, values: list[list]) -> int:
 
 # ============================================================
 # FIX #2 — hapus kode mati & perbaiki logika TTL cache
-# OPT #1 — cache ini sekarang dipakai konsisten di semua jalur baca
-#           non-real-time (find_transaction_ids, header check, dll.)
+# OPT #1 — cache dipakai konsisten di semua jalur baca non-real-time
 # ============================================================
 def _cached_get_all_values(worksheet):
-    """Return all values from *worksheet* using a short-lived in-memory cache.
-
-    The cache expires after :data:`_READ_CACHE_SECONDS` seconds. Use this
-    for non-real-time reads to reduce Google Sheets read quota consumption.
-
-    Do NOT use this for post-write verification where freshness matters
-    (call ``invalidate_cache`` first, then read directly).
-    """
+    """Return all values from *worksheet* using a short-lived in-memory cache."""
     now = monotonic()
     cache_key = getattr(worksheet, "title", "unknown")
     with _cache_lock:
         entry = _record_cache.get(cache_key)
-        # FIX #2 — perbaiki kondisi cache (sebelumnya tidak pernah expire)
         if entry and now - entry["timestamp"] < _READ_CACHE_SECONDS:
             return entry["values"]
         values = _retry_google_call(worksheet.get_all_values)
@@ -186,22 +207,12 @@ def _cached_get_all_values(worksheet):
 
 
 # ============================================================
-# FIX #1 — definisi _ensure_transaction_id_header (sebelumnya hilang)
-# OPT #4 — pakai _cached_get_all_values (header jarang berubah,
-#          cache 3 detik aman dan menghemat 1 panggilan baca/transaksi)
+# FIX #1 — definisi _ensure_transaction_id_header
+# OPT #4 — pakai cache header (jarang berubah)
 # ============================================================
 def _ensure_transaction_id_header(worksheet) -> bool:
     """Pastikan worksheet punya kolom 'Transaction ID' di header.
-
-    - Append-only: kolom baru ditambahkan di akhir header, kolom lama
-      tidak digeser.
-    - Idempoten: jika sudah ada, tidak melakukan apa-apa.
-    - Return True jika header baru ditambahkan, False jika sudah ada.
-
-    Args:
-        worksheet: gspread Worksheet object.
-    """
-    # OPT #4 — pakai cache: header jarang berubah, cache 3 detik aman
+    Append-only, idempoten. Return True jika header baru ditambahkan."""
     values = _cached_get_all_values(worksheet)
     if not values:
         return False
@@ -211,8 +222,6 @@ def _ensure_transaction_id_header(worksheet) -> bool:
     )
     header_row_number = header_row_index + 1
 
-    # Bersihkan cell B1 jika baris 1 adalah banner judul yang sebelumnya
-    # terisi "Transaction ID" (kasus migrasi lama).
     if header_row_index > 0 and len(values) > 0 and len(values[0]) > 1:
         if str(values[0][1]).strip().casefold() == "transaction id":
             _retry_google_call(worksheet.update_cell, 1, 2, "")
@@ -228,13 +237,11 @@ def _ensure_transaction_id_header(worksheet) -> bool:
     if "transaction id" in normalized:
         return False
 
-    # Buang kolom nomor/no yang akan duplikat dengan Transaction ID
     repaired = [
         value for index, value in enumerate(header)
         if normalized[index] not in {"nomor", "no", "no.", "id transaksi", "transaction id"}
     ]
 
-    # Sisipkan setelah "Sisa Saldo" jika ada, atau setelah "Pengeluaran (Rp)"
     insert_index = len(repaired)
     for idx, value in enumerate(repaired):
         if _normalize_header_label(value) == "sisa saldo":
@@ -294,19 +301,11 @@ def _sort_rows_by_date(rows, date_column_index):
 
 
 # ============================================================
-# OPT #5 — fungsi sorting terpisah, dipanggil periodik
-#          (bukan di setiap transaksi). Hemat 1-2 panggilan baca/transaksi.
+# OPT #5 — sorting terpisah, dipanggil periodik (bukan jalur kritis)
 # ============================================================
 def sort_sheet_rows(sheet_name: str) -> bool:
-    """Sort worksheet data rows by date. Dipanggil periodik (mis. dari
-    daily_backup atau task terjadwal), BUKAN dari jalur kritis transaksi.
-
-    Return True jika sorting dilakukan, False jika tidak ada baris.
-
-    OPT #5 — sebelumnya sorting dijalankan di akhir append_rows_atomically
-    setiap transaksi (baca ulang seluruh sheet). Dipindah ke sini agar
-    jalur kritis transaksi tidak memakan kuota baca berlebih.
-    """
+    """Sort worksheet data rows by date. Panggil periodik (mis. daily_backup),
+    BUKAN dari jalur kritis transaksi."""
     worksheet = get_sheet(sheet_name, create=False)
     if not worksheet:
         return False
@@ -372,12 +371,9 @@ def get_spreadsheet():
 
 
 # ============================================================
-# FIX #4 — hapus blok `with _cache_lock` duplikat (dead code)
+# FIX #4 — hapus blok duplikat di get_sheet
 # ============================================================
 def get_sheet(name: str, create=True):
-    """Retrieve a worksheet, creating it if needed.
-    The result is cached in ``_worksheet_cache`` to avoid repeated API calls.
-    """
     with _cache_lock:
         if name in _worksheet_cache:
             worksheet = _worksheet_cache[name]
@@ -400,26 +396,10 @@ def invalidate_cache(sheet_name: str) -> None:
 
 
 def _ensure_sheet_exists(name: str, headers: list[str]):
-    """Return the named worksheet, auto-creating it with *headers* if missing.
-
-    If the sheet does not exist it will be created, headers written to row 1,
-    and row 1 frozen.  A WARNING is logged so operators know auto-creation
-    happened.  Also ensures the sheet has at least ``len(headers)`` columns.
-
-    Args:
-        name: Worksheet title.
-        headers: List of column header strings to write on row 1 when creating.
-
-    Returns:
-        A gspread Worksheet object (never None).
-
-    Raises:
-        SheetRangeError: Wraps any unexpected API error with an actionable hint.
-    """
+    """Return the named worksheet, auto-creating it with *headers* if missing."""
     try:
         worksheet = get_sheet(name, create=False)
         if worksheet is None:
-            # FIX #6 — pesan log dalam bahasa Indonesia (sebelumnya Portugis)
             logger.warning("SHEET_AUTOCREATED:%s — worksheet dibuat otomatis", name)
             worksheet = get_sheet(name, create=True)
             end_col = _column_name(len(headers))
@@ -500,8 +480,6 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
         worksheet = get_sheet(sheet_name, create=False)
         if not worksheet:
             raise ValueError(f"Worksheet not found: {sheet_name}")
-        # FIX #1 + OPT #4 — cache header check (1 panggilan baca pertama,
-        # selanjutnya gratis dalam 3 detik)
         _ensure_transaction_id_header(worksheet)
         request_rows = []
         date_columns = set()
@@ -551,9 +529,7 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
         "append_rows_atomically",
     )
 
-    # OPT #5 — sorting TIDAK lagi dilakukan di sini.
-    # Panggil sort_sheet_rows(sheet_name) dari task periodik
-    # (mis. daily_backup) agar jalur kritis transaksi tidak memakan kuota baca.
+    # OPT #5 — sorting TIDAK di sini. Panggil sort_sheet_rows() periodik.
     for sheet_name in rows_by_name:
         invalidate_cache(sheet_name)
 
@@ -766,7 +742,6 @@ def archive_daily_detail(archive_month: str, rows: list[list], new_period_label:
 
 
 def update_cell(sheet_name: str, row: int, column: int, value):
-    """Update a worksheet cell using Google Sheets' 1-based coordinates."""
     sheet = get_sheet(sheet_name, create=False)
     if not sheet:
         raise ValueError(f"Worksheet not found: {sheet_name}")
@@ -852,23 +827,11 @@ def get_all_records_many(sheet_names: list[str]) -> dict[str, list[dict]]:
                 uncached_names.append(name)
 
         if uncached_names:
-            if len(uncached_names) == 1:
-                name = uncached_names[0]
-                worksheet = get_sheet(name, create=False)
-                values = worksheet.get_all_values() if worksheet else []
-                value_sets = [(name, values)]
-            else:
-                ranges = [_a1_column_range(name) for name in uncached_names]
-                response = _retry_google_call(
-                    get_spreadsheet().values_batch_get,
-                    ranges,
-                    params={"majorDimension": "ROWS"},
-                )
-                value_sets = [
-                    (name, value_range.get("values", []))
-                    for name, value_range in zip(uncached_names, response.get("valueRanges", []))
-                ]
-            for name, values in value_sets:
+            # BATCH OPT — gunakan _batch_get_ranges (1 request untuk N sheet)
+            ranges = [_a1_column_range(name) for name in uncached_names]
+            raw = _batch_get_ranges(ranges)
+            for name, range_name in zip(uncached_names, ranges):
+                values = raw.get(range_name, [])
                 records = _records_from_values(values)
                 _record_cache[name] = (monotonic() + _READ_CACHE_SECONDS, records)
                 records_by_sheet[name] = records
@@ -884,35 +847,31 @@ def get_all_records(sheet_name: str) -> list:
 
 
 # ============================================================
-# OPT #2 — baca HANYA kolom Transaction ID (col_values),
-#          bukan seluruh sheet. Payload baca turun ~90%.
-# OPT #1 — header lookup pakai cache.
+# BATCH OPT #2 — find_transaction_ids baca kolom via batchGet.
+# Untuk 5 sheet unit sekaligus = 1 request (bukan 5).
+# Header lookup tetap pakai cache dari get_all_values.
 # ============================================================
 def find_transaction_ids(sheet_names: list[str], tx_ids: list[str]) -> dict[str, list[str]]:
     """Cari transaction ID yang sudah ada di sheet.
 
-    OPT #2 — alih-alih membaca seluruh sheet dengan get_all_values(),
-    fungsi ini:
-      1. Membaca header (baris 1) — di-cache 3 detik (OPT #1).
-      2. Menemukan indeks kolom Transaction ID.
-      3. Membaca HANYA kolom itu dengan worksheet.col_values().
-    Ini mengurangi payload baca ~90% dibanding scan seluruh sheet.
+    BATCH OPT #2 — untuk N sheet, lakukan SATU batchGet berisi N range
+    kolom Transaction ID, bukan N request terpisah.
     """
     requested_ids = {str(tx_id).strip() for tx_id in tx_ids if str(tx_id).strip()}
     found = {tx_id: [] for tx_id in requested_ids}
     if not requested_ids:
         return found
 
+    # Langkah 1: cari indeks kolom Transaction ID per sheet (pakai cache header)
+    sheets_to_query = []
+    col_index_by_sheet = {}
     for sheet_name in dict.fromkeys(sheet_names):
         worksheet = get_sheet(sheet_name, create=False)
         if not worksheet:
             continue
-
-        # OPT #2 + OPT #1 — cari kolom dari header via cache (1 baris)
         header_values = _cached_get_all_values(worksheet)
         if not header_values:
             continue
-        # Deteksi baris header (bisa multi-baris karena banner judul)
         header_row_index = _detect_header_row_index(sheet_name, header_values)
         if header_row_index >= len(header_values):
             continue
@@ -924,24 +883,30 @@ def find_transaction_ids(sheet_names: list[str], tx_ids: list[str]) -> dict[str,
         )
         if tx_col_index is None:
             continue
+        sheets_to_query.append(sheet_name)
+        col_index_by_sheet[sheet_name] = (tx_col_index, header_row_index)
 
-        # OPT #2 — baca HANYA kolom Transaction ID
-        try:
-            col_values = _retry_google_call(
-                worksheet.col_values, tx_col_index + 1
-            )
-        except Exception as exc:
-            # Fallback: jika col_values gagal (mis. sheet aneh), pakai cache
-            logger.warning(
-                "find_transaction_ids.col_values_failed sheet=%s error=%s",
-                sheet_name, type(exc).__name__,
-            )
-            col_values = [
-                (row[tx_col_index] if tx_col_index < len(row) else "")
-                for row in header_values
-            ]
+    if not sheets_to_query:
+        return found
 
-        start_row = header_row_index + 1  # skip header
+    # Langkah 2: BATCH — baca semua kolom Transaction ID dalam 1 request.
+    # Kolom per sheet bisa berbeda (karena perbedaan header), jadi
+    # kelompokkan berdasarkan huruf kolom.
+    grouped = {}
+    for sheet_name in sheets_to_query:
+        tx_col_index, _ = col_index_by_sheet[sheet_name]
+        col_letter = _column_name(tx_col_index + 1)
+        grouped.setdefault(col_letter, []).append(sheet_name)
+
+    col_values_by_sheet = {}
+    for col_letter, names in grouped.items():
+        col_values_by_sheet.update(_batch_get_sheet_columns(names, col_letter))
+
+    # Langkah 3: cocokkan ID
+    for sheet_name in sheets_to_query:
+        tx_col_index, header_row_index = col_index_by_sheet[sheet_name]
+        col_values = col_values_by_sheet.get(sheet_name, [])
+        start_row = header_row_index + 1
         for value in col_values[start_row:]:
             tx_id = str(value).strip()
             if tx_id in requested_ids and sheet_name not in found[tx_id]:
@@ -950,10 +915,6 @@ def find_transaction_ids(sheet_names: list[str], tx_ids: list[str]) -> dict[str,
 
 
 def _transaction_id_column(worksheet, header_row_number):
-    """Return (column_index, values) untuk kolom Transaction ID.
-
-    OPT #1 — pakai cache untuk header lookup.
-    """
     values = _cached_get_all_values(worksheet)
     header_index = header_row_number - 1
     while len(values) <= header_index:
@@ -1033,9 +994,6 @@ def _write_archive_manifest(manifest_key, manifest):
     invalidate_cache("_Meta")
 
 
-# ============================================================
-# FIX #5 — fallback jika `error_code` tidak diekspor oleh app.core.retry
-# ============================================================
 def _log_archive_verification_failure(archived_at, missing_ids, extra_ids, error=None):
     try:
         from app.core.retry import error_code
@@ -1060,37 +1018,43 @@ def _log_archive_verification_failure(archived_at, missing_ids, extra_ids, error
 
 
 # ============================================================
-# OPT #6 — verifikasi arsip baca HANYA kolom yang relevan
-#          (Transaction ID, Diarsipkan, Unit Usaha), bukan seluruh sheet.
+# BATCH OPT #3 — verifikasi arsip baca 3 kolom dalam 1 batchGet
+# (bukan 3 col_values terpisah). Per attempt = 1 request.
+# Juga kurangi attempt 4→3 dengan exponential backoff + jitter.
 # ============================================================
 def _read_archive_unit_ids(archive_worksheet, archived_at: str, unit: str, tx_col: int, archived_col: int):
-    """Baca hanya transaction ID untuk unit+archived_at tertentu.
+    """Baca transaction ID untuk unit+archived_at tertentu.
 
-    OPT #6 — alih-alih get_all_values() seluruh arsip, baca
-    hanya kolom yang relevan via col_values. Jauh lebih hemat kuota
-    terutama untuk _ArsipTransaksi yang bisa membesar.
+    BATCH OPT #3 — 3 kolom (Unit, Tx ID, Diarsipkan) dibaca dalam
+    1 batchGet request (bukan 3 col_values terpisah).
     """
+    sheet_name = getattr(archive_worksheet, "title", "_ArsipTransaksi")
+    quoted = _quote_sheet_name(sheet_name)
+    unit_letter = _column_name(1)
+    tx_letter = _column_name(tx_col + 1)
+    archived_letter = _column_name(archived_col + 1)
+    ranges = [
+        f"{quoted}!{unit_letter}:{unit_letter}",
+        f"{quoted}!{tx_letter}:{tx_letter}",
+        f"{quoted}!{archived_letter}:{archived_letter}",
+    ]
     try:
-        unit_col = _retry_google_call(archive_worksheet.col_values, 1)  # Unit Usaha
-        tx_col_vals = _retry_google_call(archive_worksheet.col_values, tx_col + 1)
-        archived_col_vals = _retry_google_call(archive_worksheet.col_values, archived_col + 1)
+        raw = _batch_get_ranges(ranges)
+        unit_col_vals = [r[0] if r else "" for r in raw.get(ranges[0], [])]
+        tx_col_vals = [r[0] if r else "" for r in raw.get(ranges[1], [])]
+        archived_col_vals = [r[0] if r else "" for r in raw.get(ranges[2], [])]
     except Exception:
-        # Fallback ke get_all_values jika col_values gagal
         values = _retry_google_call(archive_worksheet.get_all_values)
-        unit_col = [row[0] if row else "" for row in values]
-        tx_col_vals = [
-            row[tx_col] if tx_col < len(row) else "" for row in values
-        ]
-        archived_col_vals = [
-            row[archived_col] if archived_col < len(row) else "" for row in values
-        ]
+        unit_col_vals = [row[0] if row else "" for row in values]
+        tx_col_vals = [row[tx_col] if tx_col < len(row) else "" for row in values]
+        archived_col_vals = [row[archived_col] if archived_col < len(row) else "" for row in values]
 
     ids = set()
-    max_len = max(len(unit_col), len(tx_col_vals), len(archived_col_vals))
-    for idx in range(1, max_len):  # skip header
-        u = str(unit_col[idx]).strip() if idx < len(unit_col) else ""
-        a = str(archived_col_vals[idx]).strip() if idx < len(archived_col_vals) else ""
+    max_len = max(len(unit_col_vals), len(tx_col_vals), len(archived_col_vals))
+    for idx in range(1, max_len):
+        u = str(unit_col_vals[idx]).strip() if idx < len(unit_col_vals) else ""
         t = str(tx_col_vals[idx]).strip() if idx < len(tx_col_vals) else ""
+        a = str(archived_col_vals[idx]).strip() if idx < len(archived_col_vals) else ""
         if u == unit and a == archived_at and t:
             ids.add(t)
     return ids
@@ -1102,12 +1066,10 @@ def archive_unit_transactions(
 ) -> dict:
     """Archive ledger rows from multiple unit sheets to *_ArsipTransaksi*.
 
-    Returns:
-        {
-            "archived":       {unit: row_count},
-            "failed":         {unit: error_msg},
-            "skipped_delete": [unit, ...],
-        }
+    BATCH OPT #4 — untuk multiple unit:
+    - Satu batchGet untuk baca semua ledger sumber sekaligus.
+    - Satu batchGet untuk verifikasi (bukan per unit).
+    - find_transaction_ids sudah pakai batch (BATCH OPT #2).
     """
     archive = _ensure_sheet_exists("_ArsipTransaksi", ARSIP_HEADERS)
     archive_id_column, archive_values_before = _transaction_id_column(archive, 1)
@@ -1117,8 +1079,29 @@ def archive_unit_transactions(
          if str(value).strip().casefold() == "diarsipkan"),
         10,
     )
+    before_ids = {
+        _row_transaction_id(row, archive_id_column)
+        for row in archive_values_before[1:]
+        if _row_transaction_id(row, archive_id_column)
+    }
 
     result: dict = {"archived": {}, "failed": {}, "skipped_delete": []}
+
+    # BATCH OPT #4 — baca semua sheet sumber dalam SATU batchGet
+    source_ranges = [
+        f"{_quote_sheet_name(unit)}!A:Z" for unit in rows_by_unit
+    ]
+    source_values_by_unit = {}
+    try:
+        raw = _batch_get_ranges(source_ranges)
+        for unit, range_name in zip(rows_by_unit, source_ranges):
+            source_values_by_unit[unit] = raw.get(range_name, [])
+    except Exception as exc:
+        logger.warning("BATCH_READ_SOURCES_FAILED error=%s", type(exc).__name__)
+        # Fallback: baca per sheet
+        for unit in rows_by_unit:
+            ws = get_sheet(unit, create=False)
+            source_values_by_unit[unit] = ws.get_all_values() if ws else []
 
     for unit, rows in rows_by_unit.items():
         try:
@@ -1126,7 +1109,26 @@ def archive_unit_transactions(
             if not source:
                 raise ValueError(f"Worksheet sumber tidak ditemukan: {unit}")
 
-            source_id_column, source_values = _transaction_id_column(source, 2)
+            source_values = source_values_by_unit.get(unit, [])
+            # Cari kolom Transaction ID di source (dari header yang sudah dibaca)
+            source_header_idx = _detect_header_row_index(unit, source_values)
+            if source_header_idx >= len(source_values):
+                raise ValueError(f"Header sheet sumber tidak ditemukan: {unit}")
+            source_header = source_values[source_header_idx]
+            source_id_column = next(
+                (i for i, h in enumerate(source_header)
+                 if str(h).strip().casefold() == "transaction id"),
+                None,
+            )
+            if source_id_column is None:
+                # Tulis header Transaction ID jika belum ada
+                source_id_column = len(source_header)
+                _retry_google_call(
+                    source.update_cell, source_header_idx + 1,
+                    source_id_column + 1, "Transaction ID",
+                )
+                invalidate_cache(unit)
+
             unit_ids: list[str] = []
             delete_rows: list[tuple[int, list]] = []
             archived_rows: list[list] = []
@@ -1151,8 +1153,11 @@ def archive_unit_transactions(
                 archived_rows.append([unit, *padded, archived_at, transaction_id])
 
             if archived_rows:
-                existing_ids = find_transaction_ids(["_ArsipTransaksi"], unit_ids)
-                rows_to_append = [row for row in archived_rows if not existing_ids.get(row[-1])]
+                # Cek duplikat via before_ids (tanpa panggilan baca tambahan)
+                rows_to_append = [
+                    row for row in archived_rows
+                    if row[-1] not in before_ids
+                ]
                 if rows_to_append:
                     _safe_append(
                         lambda r=rows_to_append: archive.append_rows(r, value_input_option="USER_ENTERED"),
@@ -1161,14 +1166,14 @@ def archive_unit_transactions(
                         f"archive_unit_transactions_append:{unit}",
                     )
 
-                # Verifikasi post-append dengan retry
+                # BATCH OPT #3 — verifikasi: 3 attempt, backoff+jitter, 1 batchGet/attempt
                 expected_ids = set(unit_ids)
                 found_ids: set[str] = set()
                 missing_ids = expected_ids
-                for _attempt in range(4):
+                for _attempt in range(3):
                     if _attempt > 0:
-                        sleep(3)
-                    # OPT #6 — baca hanya kolom relevan (bukan seluruh sheet)
+                        import random as _random
+                        sleep(min(1.0 * (2 ** _attempt) + _random.uniform(0, 0.5), 5.0))
                     invalidate_cache("_ArsipTransaksi")
                     found_ids = _read_archive_unit_ids(
                         archive, archived_at, unit, archive_id_column, archived_at_column,
@@ -1197,6 +1202,8 @@ def archive_unit_transactions(
                 for row_number, row_values in reversed(delete_rows):
                     _safe_delete_rows(source, row_number, row_values)
                 invalidate_cache(unit)
+                # Update before_ids untuk unit berikutnya di loop yang sama
+                before_ids.update(unit_ids)
 
             result["archived"][unit] = len(archived_rows)
 

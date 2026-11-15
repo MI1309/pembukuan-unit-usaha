@@ -73,20 +73,43 @@ class SheetStructureTests(unittest.TestCase):
         replace_rows.assert_called_once_with("(1)Rekap Bulanan ", "2026-11", [])
 
     def test_archives_transactions_then_removes_source_rows(self):
+        unit_name = "(3)Pertanian "
+        source_row = ["", "2026-10-01", "Pupuk"]
+        transaction_id = sheet_repo._legacy_row_transaction_id(unit_name, 4, source_row)
+        archive_headers = [
+            "Unit Usaha", "Nomor", "Tanggal", "Nama Barang/Jasa/Produk", "Keterangan",
+            "Kuantitas", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Saldo", "Diarsipkan",
+        ]
+        archived_values = [
+            [*archive_headers, "Transaction ID"],
+            [unit_name, *source_row, *([""] * 6), "2026-11-13 08:00:00", transaction_id],
+        ]
         archive = unittest.mock.Mock()
+        archive.get_all_values.side_effect = [
+            [archive_headers],
+            [[*archive_headers, "Transaction ID"]],
+            archived_values,
+        ]
         unit = unittest.mock.Mock()
-        unit.row_values.return_value = ["", "2026-10-01", "Pupuk"]
-        with patch.object(sheet_repo, "get_sheet", side_effect=lambda name, create=True: {
-            "_ArsipTransaksi": archive,
-            "(3)Pertanian ": unit,
-        }[name]), patch.object(sheet_repo, "invalidate_cache"):
+        unit.get_all_values.return_value = [
+            ["Kakorlap Unit Usaha Pertanian"],
+            ["Nomor", "Tanggal", "Nama Barang/Jasa /Produk", "Transaction ID"],
+            [],
+            source_row,
+        ]
+        unit.row_values.return_value = [*source_row, transaction_id]
+        metadata = unittest.mock.Mock()
+        metadata.get_all_values.return_value = [["Key", "Value"]]
+        sheets = {"_ArsipTransaksi": archive, unit_name: unit, "_Meta": metadata}
+        with patch.object(sheet_repo, "get_sheet", side_effect=lambda name, create=True: sheets[name]), \
+             patch.object(sheet_repo, "invalidate_cache"):
             count = sheet_repo.archive_unit_transactions({
-                "(3)Pertanian ": [(4, ["", "2026-10-01", "Pupuk"])],
+                unit_name: [(4, source_row)],
             }, "2026-11-13 08:00:00")
 
         self.assertEqual(count, 1)
         archive.append_rows.assert_called_once_with(
-            [["(3)Pertanian ", "", "2026-10-01", "Pupuk", "", "", "", "", "", "", "2026-11-13 08:00:00"]],
+            [[unit_name, "", "2026-10-01", "Pupuk", "", "", "", "", "", "", "2026-11-13 08:00:00", transaction_id]],
             value_input_option="USER_ENTERED",
         )
         unit.delete_rows.assert_called_once_with(4)

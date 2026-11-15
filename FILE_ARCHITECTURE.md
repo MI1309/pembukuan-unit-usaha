@@ -2,7 +2,7 @@
 
 ## Bot WhatsApp Automation PT Lentera Agrinova Organik
 
-Dokumen ini memetakan seluruh **23 file Python** di bawah `app/` berdasarkan kode saat ini. Fungsi yang tidak memiliki anotasi tipe di source ditandai sebagai **tipe inferensi**. Daftar dependensi berfokus pada import langsung; alur runtime tambahan disebutkan pada catatan arsitektur.
+Dokumen ini memetakan seluruh **26 file Python** di bawah `app/` berdasarkan kode saat ini. Fungsi yang tidak memiliki anotasi tipe di source ditandai sebagai **tipe inferensi**. Daftar dependensi berfokus pada import langsung; alur runtime tambahan disebutkan pada catatan arsitektur.
 
 ## 1. Entry Point & Config
 
@@ -125,6 +125,23 @@ Dokumen ini memetakan seluruh **23 file Python** di bawah `app/` berdasarkan kod
 
 **Catatan Arsitektur:** Retry mencatat attempt, delay, dan kode error pada level WARNING tanpa mencetak pesan exception mentah. Append tanpa Transaction ID tidak diulang karena repository tidak dapat memastikan apakah server sudah menerapkannya; timeout/koneksi hanya dipertimbangkan pada helper append yang memiliki pemeriksaan ID.
 
+### 📄 `app/core/transaction_id.py`
+**Peran Utama:** Membuat Transaction ID deterministik untuk ledger, detail harian, dan arsip.
+
+**Prinsip SOLID yang Dijaga:** Single Responsibility sebagai pembentuk identitas transaksi yang tidak bergantung pada Google Sheets atau router.
+
+**Dependensi (Import):** Standard library `hashlib`, `re`, `datetime.date/datetime`.
+
+**Fungsi Publik:**
+- `generate_transaction_id(sender, tanggal, produk, kuantitas, nominal, keterangan, unit) -> str`: Menghasilkan `{YYYYMMDD}-{UNIT_CODE}-{HASH8}` dari field transaksi yang dinormalisasi.
+
+**Trigger deteksi duplikat otomatis:**
+- Deteksi duplikat tidak terjadi saat file dibuka atau saat webhook hanya menerima pesan. Trigger yang benar adalah saat proses bisnis sudah menyelesaikan normalisasi dan akan menulis ke Google Sheets.
+- Sistem membuat `transaction_id` dari sender, tanggal, produk, kuantitas, nominal, dan keterangan; lalu `sheet_repo.find_transaction_ids()` mengecek kolom `Transaction ID` di ledger/detail sebelum `append_rows_atomically()`.
+- Jika ID sudah ada, transaksi diangap duplikat dan dilewati dengan status `DUPLICATE_SKIPPED` tanpa menambah baris baru. Ini mencegah double entry walaupun pesan/permintaan datang ulang.
+
+**Catatan Arsitektur:** Kode unit yang dikenal mencakup PRT, TAF, TAE, IKN, dan PPK; unit yang tidak dikenali menghasilkan `UNK`. `sales_service` mengekspos wrapper dengan nama fungsi sama.
+
 ## 3. Repository Layer
 
 ### 📄 `app/repositories/sheet_repo.py`
@@ -132,7 +149,7 @@ Dokumen ini memetakan seluruh **23 file Python** di bawah `app/` berdasarkan kod
 
 **Prinsip SOLID yang Dijaga:** Repository Pattern memisahkan akses gspread dari aturan bisnis service; tanggung jawabnya tetap berpusat pada persistence spreadsheet.
 
-**Dependensi (Import):** Standard library `re`, `datetime.date`, `threading.RLock`, `time.monotonic`; package eksternal `gspread`, `oauth2client.service_account.ServiceAccountCredentials`, `gspread.utils.numericise`; `app.config.config`. OAuth Drive diambil secara lazy dari `app.services.drive_oauth`.
+**Dependensi (Import):** Standard library `hashlib`, `json`, `logging`, `re`, `datetime`, `threading.RLock`, `time.monotonic`; package eksternal `gspread`, `oauth2client.service_account.ServiceAccountCredentials`, `gspread.utils.numericise`; `app.config.config`; `app.core.retry`; `app.core.transaction_id`; `app.core.utils.parse_amount`. OAuth Drive dan pencatatan failure arsip diambil secara lazy dari service terkait.
 
 **Fungsi/Class Publik:**
 - `get_client()`: Membuat/mengembalikan gspread client yang diotorisasi menggunakan Service Account.
@@ -148,9 +165,13 @@ Dokumen ini memetakan seluruh **23 file Python** di bawah `app/` berdasarkan kod
 - `get_sales_data()`: Membaca records dari worksheet legacy `Rincian Penjualan`.
 - `get_all_records_many(sheet_names: list[str]) -> dict[str, list[dict]]`: Membaca dan mengubah values menjadi records untuk satu/beberapa sheet.
 - `get_all_records(sheet_name: str) -> list`: Convenience wrapper untuk membaca records satu sheet.
-- `archive_unit_transactions(rows_by_unit: dict, archived_at: str) -> int`: Menyalin transaksi ke `_ArsipTransaksi`, kemudian menghapus baris sumber.
+- `find_transaction_ids(sheet_names: list[str], tx_ids: list[str]) -> dict[str, list[str]]`: Mencari ID hanya pada kolom `Transaction ID` dan mengembalikan worksheet yang memuat tiap ID.
+- `archive_unit_transactions(rows_by_unit: dict, archived_at: str) -> int`: Menyalin baris, memverifikasi set ID dan menulis manifest `_Meta` sebelum menghapus sumber; mismatch menghasilkan `ArchiveVerificationError` tanpa delete.
+- `verify_archive_manifest(manifest_key: str) -> dict`: Membandingkan count dan hash ID arsip dengan manifest.
+- `rollback_archive(manifest_key: str, apply: bool = True) -> dict`: Menghitung atau memulihkan baris ledger yang hilang dari arsip yang lolos verifikasi.
+- `ArchiveVerificationError`: Error arsip dengan atribut `missing_ids` dan `extra_ids`.
 
-**Catatan Arsitektur:** Credential Sheets berasal dari Service Account `credentials.json`; akses Drive backup memakai OAuth terpisah. Client, worksheet cache, lock, dan record cache bersifat global dalam satu proses; cache record memiliki TTL sekitar tiga detik. Penulisan batch membantu konsistensi transaksi, tetapi operasi arsip append lalu delete adalah beberapa langkah dan bukan satu transaksi lintas operasi.
+**Catatan Arsitektur:** Credential Sheets berasal dari Service Account `credentials.json`; akses Drive backup memakai OAuth terpisah. Client, worksheet cache, lock, dan record cache bersifat global dalam satu proses; cache record memiliki TTL sekitar tiga detik. Append dengan ID memeriksa keberadaan ID sebelum retry; delete memverifikasi ulang baris. Copy arsip dan delete bukan satu transaksi API, tetapi manifest ditulis setelah verifikasi dan sebelum delete agar partial-delete dapat dipulihkan.
 
 ## 4. Service Layer
 
@@ -163,7 +184,8 @@ Dokumen ini memetakan seluruh **23 file Python** di bawah `app/` berdasarkan kod
 
 **Fungsi/Class Publik:**
 - `get_unit_sheet(produk_nama: str) -> str`: Memetakan nama produk penjualan ke worksheet unit.
-- `process_sales(message: str, confirmed: bool = False) -> tuple[bool, str, dict | None]`: Mem-parsing dan memvalidasi transaksi, menunggu konfirmasi jika nominal besar, atau menyimpan baris yang valid.
+- `generate_transaction_id(sender, tanggal, produk, kuantitas, nominal, keterangan, unit) -> str`: Wrapper generator ID dari `app.core.transaction_id`.
+- `process_sales(message: str, confirmed: bool = False, sender: str = "") -> tuple[bool, str, dict | None]`: Mem-parsing dan memvalidasi transaksi, menunggu konfirmasi jika nominal besar, memeriksa ID duplikat, atau menyimpan baris yang valid. `sender` opsional untuk kompatibilitas pemanggil lama.
 - `process_rekap(message: str) -> str | None`: Membentuk rekap transaksi untuk periode yang diminta melalui pesan.
 - `save_daily_recap(target: date | None = None) -> None`: Mengganti rekap harian pada worksheet recap.
 - `save_monthly_recap(target: date | None = None) -> None`: Mengganti rekap bulanan pada worksheet recap.
@@ -172,7 +194,7 @@ Dokumen ini memetakan seluruh **23 file Python** di bawah `app/` berdasarkan kod
 - `handle_help_command(message: str) -> str | None`: Menghasilkan panduan bot untuk perintah bantuan yang dikenali.
 - `help_copy_messages() -> list[str]`: Mengembalikan contoh pesan transaksi siap salin.
 
-**Catatan Arsitektur:** Service ini melakukan orkestrasi parsing, perhitungan, pengarsipan, dan persistence. Pemetaan penjualan otomatis hanya mencakup kategori yang ditentukan di kode; pembelian memerlukan unit yang disebut eksplisit. Lock penyimpanan hanya melindungi proses lokal dan bukan mekanisme idempotensi terdistribusi.
+**Catatan Arsitektur:** Service ini melakukan orkestrasi parsing, perhitungan, pengarsipan, dan persistence. ID yang sudah ada menghasilkan respons duplicate dan log `DUPLICATE_SKIPPED`; Transaction ID berbasis konten juga menangani redelivery tanpa event ID. Pemetaan penjualan otomatis hanya mencakup kategori yang ditentukan di kode; pembelian memerlukan unit yang disebut eksplisit. Lock penyimpanan hanya melindungi proses lokal.
 
 ### 📄 `app/services/karyawan_service.py`
 **Peran Utama:** Mengelola profil karyawan, pencocokan nomor dan role, perintah karyawan/admin, presensi, serta statistik kehadiran.
@@ -360,3 +382,24 @@ Dokumen ini memetakan seluruh **23 file Python** di bawah `app/` berdasarkan kod
 - `main(argv: list[str] | None = None) -> int`: Menyediakan CLI dengan opsi `--apply` dan pembatas `--sheet`.
 
 **Catatan Arsitektur:** Dry-run adalah default. Saat apply, kode berusaha mempertahankan data legacy dan melewati struktur yang tidak cocok; tetap lakukan pemeriksaan spreadsheet/backup sebelum perubahan struktur penting.
+
+### 📄 `app/migrate_tx_id.py`
+**Peran Utama:** CLI dry-run/apply untuk menambahkan header `Transaction ID` di ujung schema dan mengisi ID deterministik pada transaksi legacy tanpa ID.
+
+**Dependensi (Import):** Standard library `argparse`, `sys`; `app.config.config`; `app.core.transaction_id`; `app.core.utils.parse_amount`; `app.repositories.sheet_repo`.
+
+**Fungsi Publik:**
+- `migrate_transaction_ids(apply: bool = False) -> dict`: Menghitung baris yang perlu diisi atau menulis header dan ID; ID yang sudah ada tidak diubah.
+- `main(argv: list[str] | None = None) -> int`: CLI `python -m app.migrate_tx_id`; dry-run default, `--apply` untuk menulis.
+
+**Catatan Arsitektur:** Targetnya seluruh ledger unit, `(2)Rincian Transaksi Harian`, dan `_ArsipTransaksi`. Untuk data lama sender asli tidak tersedia, sehingga ID migrasi dibentuk dari field baris dengan sender kosong. Penulisan ID dibatch per worksheet untuk mengurangi request API. Baris dengan tanggal kosong/tidak valid dilewati dan jumlahnya ditampilkan per worksheet.
+
+### 📄 `app/verify_archive.py`
+**Peran Utama:** CLI untuk memeriksa ulang manifest arsip atau merencanakan/melakukan restore ke ledger.
+
+**Dependensi (Import):** Standard library `argparse`, `sys`; `app.repositories.sheet_repo`.
+
+**Fungsi Publik:**
+- `main(argv: list[str] | None = None) -> int`: Menerima `--manifest <key>` untuk verifikasi atau `--restore <key>` untuk dry-run restore; `--apply` mengaktifkan penulisan restore.
+
+**Catatan Arsitektur:** Restore hanya dilakukan dari manifest yang lolos verifikasi dan hanya menambahkan Transaction ID yang belum ada di ledger.

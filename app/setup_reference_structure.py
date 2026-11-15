@@ -11,11 +11,11 @@ from app.repositories import sheet_repo
 
 LEDGER_HEADERS = [
     "Nomor", "Tanggal", "Nama Barang/Jasa /Produk", "Keterangan Transaksi",
-    "Kuantitas", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Sisa Saldo",
+    "Kuantitas", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Sisa Saldo", "Transaction ID",
 ]
 SPECS = [
     {"name": "(1)Rekap Bulanan ", "headers": ["Bulan", "Produk/Jasa/Barang", "Kuantitas", "Satuan", "Total (Rp)", "Jumlah Transaksi"], "freeze": 1},
-    {"name": "(2)Rincian Transaksi Harian", "title": "Industri Pertanian Terpadu Lentera Farm", "headers": ["Tanggal", "Nama Produk /Jasa/ Barang", "Keterangan Transaksi", "Kuantitas", "Satuan (Rp)", "Pemasukan (Rp)", "Pengeluaran (Rp)"], "header_row": 5, "freeze": 5},
+    {"name": "(2)Rincian Transaksi Harian", "title": "Industri Pertanian Terpadu Lentera Farm", "headers": ["Tanggal", "Nama Produk /Jasa/ Barang", "Keterangan Transaksi", "Kuantitas", "Satuan (Rp)", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Transaction ID"], "header_row": 5, "freeze": 5},
     {"name": "(3)Pertanian ", "title": "Kakorlap Unit Usaha Pertanian", "headers": LEDGER_HEADERS, "freeze": 2},
     {"name": "(4)Ternak Ayam Fazza", "title": "Kakorlap Unit Usaha Ternak Ayam Fazza : Agus Adip", "headers": LEDGER_HEADERS, "freeze": 2},
     {"name": "(5)Ternak Ayam Emran", "title": "Kakorlap Unit Usaha Ternak Ayam Emran: Agus Adip", "headers": LEDGER_HEADERS, "freeze": 2},
@@ -25,19 +25,20 @@ SPECS = [
     {"name": "_Meta", "headers": ["Key", "Value"], "freeze": 1},
     {"name": "_PendingConfirm", "headers": ["Sender", "Message", "ExpiresAt"], "freeze": 1},
     {"name": "_RekapHarian", "headers": ["Tanggal", "Produk", "Kuantitas", "Satuan", "Total (Rp)", "Jumlah Transaksi"], "freeze": 1},
-    {"name": "_ArsipTransaksi", "headers": ["Unit Usaha", "Nomor", "Tanggal", "Nama Barang/Jasa/Produk", "Keterangan", "Kuantitas", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Saldo", "Diarsipkan"], "freeze": 1},
+    {"name": "_ArsipTransaksi", "headers": ["Unit Usaha", "Nomor", "Tanggal", "Nama Barang/Jasa/Produk", "Keterangan", "Kuantitas", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Saldo", "Diarsipkan", "Transaction ID"], "freeze": 1},
     {"name": "_ArsipRincianHarian", "headers": ["Bulan Arsip", "Tanggal", "Nama Produk /Jasa/ Barang", "Keterangan Transaksi", "Kuantitas", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)"], "freeze": 1},
     {"name": "Database Karyawan", "headers": ["NIK", "Nama Karyawan", "Jabatan", "Departemen", "Tanggal Masuk", "Gaji Pokok", "No. HP", "Alamat", "Status", "Tempat Lahir", "Tanggal Lahir", "Jenis Kelamin", "Status Nikah", "Pendidikan", "Pengalaman Kerja"], "freeze": 1},
     {"name": "Presensi Karyawan", "headers": ["Tanggal", "NIK", "Nama Karyawan", "Jam Masuk", "Jam Keluar", "Status", "Keterangan", "Lembur (jam)"], "freeze": 1},
     {"name": "Slip Gaji", "headers": ["NIK", "Nama", "Periode", "Hadir", "Terlambat", "Izin/Sakit", "Cuti", "Alpha", "Gaji Pokok", "Tunjangan", "Potongan Alpha", "Potongan Telat", "Gaji Bersih", "Dicetak", "Lembur", "Bonus", "Potongan Lain"], "freeze": 1},
     {"name": "Penyesuaian Gaji", "headers": ["Tanggal", "NIK", "Nama", "Periode", "Jenis", "Jumlah (Rp)", "Keterangan", "Dicatat Oleh"], "freeze": 1},
-    {"name": "Rincian Penjualan", "headers": ["Produk", "Nomor", "Tanggal", "Keterangan", "Kuantitas", "Satuan", "Total (Rp)"], "freeze": 1, "insert_legacy_header": True},
+    {"name": "Rincian Penjualan", "headers": ["Produk", "Tanggal", "Keterangan", "Kuantitas", "Satuan", "Total (Rp)", "Transaction ID"], "freeze": 1, "insert_legacy_header": True},
 ]
 HEADER_STYLE = {
     "backgroundColor": {"red": 0.12, "green": 0.22, "blue": 0.39},
     "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True},
+    "horizontalAlignment": "CENTER",
     "verticalAlignment": "MIDDLE",
-    "wrapStrategy": "WRAP",
+    "wrapStrategy": "CLIP",
 }
 TITLE_STYLE = {
     "backgroundColor": {"red": 0.12, "green": 0.22, "blue": 0.39},
@@ -78,6 +79,45 @@ def _worksheet(spreadsheet, name: str, apply: bool):
         if not apply:
             return None, True
         return spreadsheet.add_worksheet(title=name, rows=1000, cols=max(26, len(LEDGER_HEADERS))), True
+
+
+def _repair_existing_header_row(header_row_values: list[str]) -> list[str]:
+    cleaned = [str(value).strip() for value in header_row_values]
+    for index, header in enumerate(cleaned):
+        normalized = header.lower()
+        if normalized in {"nomor", "no", "no.", "id transaksi"}:
+            cleaned[index] = "Transaction ID"
+    if "Transaction ID" not in cleaned:
+        if "Pengeluaran (Rp)" in cleaned:
+            insert_at = cleaned.index("Pengeluaran (Rp)") + 1
+            cleaned.insert(insert_at, "Transaction ID")
+        else:
+            cleaned.append("Transaction ID")
+    return cleaned
+
+
+def repair_existing_sheet_layout(sheet_name: str, apply: bool = False) -> dict:
+    spreadsheet = sheet_repo.get_spreadsheet()
+    worksheet = sheet_repo.get_sheet(sheet_name, create=False)
+    if worksheet is None:
+        return {"sheet": sheet_name, "status": "missing"}
+
+    values = worksheet.get_all_values()
+    if not values:
+        return {"sheet": sheet_name, "status": "empty"}
+
+    header_row_number = 1
+    if len(values) >= 2 and any(str(v).strip() for v in values[1]):
+        header_row_number = 2
+
+    header_row = values[header_row_number - 1]
+    repaired = _repair_existing_header_row(header_row)
+    if not apply:
+        return {"sheet": sheet_name, "status": "dry_run", "header": repaired}
+
+    worksheet.update(range_name=f"A{header_row_number}:{_column_name(len(repaired))}{header_row_number}", values=[repaired])
+    worksheet.format(f"A{header_row_number}:{_column_name(len(repaired))}{header_row_number}", HEADER_STYLE)
+    return {"sheet": sheet_name, "status": "updated", "header": repaired}
 
 
 def _ensure_spec(spreadsheet, spec: dict, apply: bool) -> str:
@@ -147,7 +187,7 @@ def _ensure_spec(spreadsheet, spec: dict, apply: bool) -> str:
     else:
         return "SKIP: existing row does not match expected header; data preserved"
 
-    if apply and action not in {"OK"}:
+    if apply:
         worksheet.format(f"A{header_row}:{end_column}{header_row}", HEADER_STYLE)
         worksheet.freeze(rows=spec.get("freeze", 1))
         if spec.get("title"):

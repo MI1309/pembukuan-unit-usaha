@@ -10,6 +10,8 @@ from app.core.utils import now_tz
 _NOTIFY_LOCK = Lock()
 _NOTIFIED_DATE = ""
 
+# whatsapp.py digunakan untuk mengirim pesan WhatsApp melalui Fonnte API, termasuk penanganan kesalahan, retry, dan notifikasi ke admin jika terjadi masalah dengan kuota atau batasan API.
+
 
 def _notify_admin_once(message: str) -> None:
     global _NOTIFIED_DATE

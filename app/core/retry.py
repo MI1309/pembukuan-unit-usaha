@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from functools import wraps
 
+# retry.py digunakan untuk menangani retry pada panggilan API Google, terutama untuk status kode HTTP yang bersifat sementara (transient), seperti 429 (Too Many Requests) atau 500 (Internal Server Error).
+
+# dengan tujuan untuk meningkatkan keandalan aplikasi saat berinteraksi dengan layanan Google, terutama ketika terjadi kesalahan sementara yang dapat diatasi dengan mencoba kembali operasi tersebut setelah beberapa waktu.
 
 logger = logging.getLogger(__name__)
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}

@@ -180,7 +180,7 @@ def process_webhook_payload(data: dict) -> dict:
         pending_message = webhook_state.get_pending_confirmation(sender)
         if pending_message and re.fullmatch(r"ya", message, re.I):
             webhook_state.clear_pending_confirmation(sender)
-            is_sale, reply, _ = sales_service.process_sales(pending_message, confirmed=True)
+            is_sale, reply, _ = sales_service.process_sales(pending_message, confirmed=True, sender=sender)
             if is_sale:
                 send_whatsapp(sender, reply)
             webhook_state.log_event(sender, "YA (konfirmasi)", "CONFIRMED")
@@ -191,7 +191,7 @@ def process_webhook_payload(data: dict) -> dict:
             webhook_state.log_event(sender, message, "CANCELLED")
             return {"status": "cancelled"}
 
-        is_sale, reply, state = sales_service.process_sales(message)
+        is_sale, reply, state = sales_service.process_sales(message, sender=sender)
         if not is_sale:
             webhook_state.log_event(sender, message, "IGNORED", error="bukan_pesan_penjualan")
             return {"status": "ignored"}

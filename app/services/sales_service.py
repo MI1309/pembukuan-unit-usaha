@@ -6,6 +6,7 @@ from threading import RLock
 from app.config import config
 from app.core.groq_ai import analyze_sales
 from app.core.utils import format_rupiah, format_tanggal_id, now_tz, parse_amount
+from app.core.transaction_id import generate_transaction_id as _generate_transaction_id
 from app.repositories import sheet_repo
 from app.core.whatsapp import send_whatsapp
 
@@ -19,11 +20,17 @@ MONTH_ALIASES = {
 }
 
 
+def generate_transaction_id(sender, tanggal, produk, kuantitas, nominal, keterangan, unit) -> str:
+    return _generate_transaction_id(sender, tanggal, produk, kuantitas, nominal, keterangan, unit)
+
+
 def get_unit_sheet(produk_nama: str) -> str:
     product = produk_nama.lower()
+    if "emran" in product:
+        return "(5)Ternak Ayam Emran"
     if "lele" in product or "ikan" in product:
         return "(6)Perikanan "
-    if "ayam" in product or "telur" in product:
+    if "fazza" in product or "ayam" in product or "telur" in product:
         return "(4)Ternak Ayam Fazza"
     if "anggur" in product:
         return "(3)Pertanian "
@@ -174,11 +181,12 @@ def _save_sale(sale: dict) -> list[tuple[str, list]]:
     unit_row = [
         "", sale["tanggal"], sale["produk"],
         sale["keterangan"], quantity_text, sale["satuan"],
-        income, expense, balance_change,
+        income, expense, balance_change, sale["transaction_id"],
     ]
     daily_detail_row = [
         sale["tanggal"], sale["produk"], sale["keterangan"],
         quantity_text, sale["satuan"], income, expense,
+        sale["transaction_id"],
     ]
     return [
         (sale["unit"], unit_row),
@@ -195,7 +203,7 @@ def _confirm_text(sale: dict) -> str:
     )
 
 
-def process_sales(message: str, confirmed: bool = False) -> tuple[bool, str, dict | None]:
+def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tuple[bool, str, dict | None]:
     parsed = analyze_sales(message)
     raw_items = parsed.get("transaksi", []) if isinstance(parsed, dict) else []
     prepared = []
@@ -205,6 +213,11 @@ def process_sales(message: str, confirmed: bool = False) -> tuple[bool, str, dic
         if error:
             failed.append(error)
         elif sale:
+            quantity_text = f"{sale['kuantitas']:g} {sale['unit_kuantitas']}".strip()
+            sale["transaction_id"] = generate_transaction_id(
+                sender, sale["tanggal"], sale["produk"], quantity_text,
+                sale["penjualan"], sale["keterangan"], sale["unit"],
+            )
             prepared.append(sale)
     if not prepared and not failed:
         return False, "", None
@@ -216,6 +229,19 @@ def process_sales(message: str, confirmed: bool = False) -> tuple[bool, str, dic
     saved = []
     with _SALES_LOCK:
         try:
+            tx_ids = [sale["transaction_id"] for sale in prepared]
+            sheet_names = list(dict.fromkeys(
+                [sale["unit"] for sale in prepared] + ["(2)Rincian Transaksi Harian"]
+            ))
+            existing = sheet_repo.find_transaction_ids(sheet_names, tx_ids)
+            duplicates = [sale for sale in prepared if existing.get(sale["transaction_id"])]
+            for sale in duplicates:
+                from app.services.webhook_state import log_event
+                log_event(sender, message, "DUPLICATE_SKIPPED", invoice=sale["transaction_id"])
+            prepared = [sale for sale in prepared if not existing.get(sale["transaction_id"])]
+            if not prepared:
+                duplicate_id = duplicates[0]["transaction_id"]
+                return False, f"Transaksi sudah tercatat sebelumnya (ID: {duplicate_id})", None
             _maybe_archive_unit_transactions(prepared[0]["tanggal"])
             _maybe_archive_daily_detail(prepared[0]["tanggal"])
             rows = [row for sale in prepared for row in _save_sale(sale)]

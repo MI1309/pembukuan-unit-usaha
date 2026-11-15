@@ -3,6 +3,8 @@ from datetime import datetime
 import pytz
 from app.config import config
 
+# beberapa fungsi utilitas yang digunakan di berbagai bagian aplikasi, terutama untuk menangani tanggal, format mata uang, dan parsing jumlah.
+
 TZ = pytz.timezone(config.TIMEZONE)
 
 def now_tz() -> datetime:

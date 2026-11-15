@@ -702,7 +702,7 @@ def get_all_records_many(sheet_names: list[str]) -> dict[str, list[dict]]:
             if len(uncached_names) == 1:
                 name = uncached_names[0]
                 worksheet = get_sheet(name, create=False)
-                 if worksheet else []
+                values = worksheet.get_all_values() if worksheet else []
                 value_sets = [(name, values)]
             else:
                 ranges = [_a1_column_range(name) for name in uncached_names]

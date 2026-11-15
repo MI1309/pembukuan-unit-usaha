@@ -84,19 +84,66 @@ def _normalize_header_label(value):
     return re.sub(r"\s+", " ", str(value or "").strip()).lower()
 
 
+def _detect_header_row_index(sheet_name: str, values: list[list]) -> int:
+    clean_name = str(sheet_name or "").strip()
+    is_title_banner = bool(
+        values and len(values) > 0 and len(values[0]) > 0
+        and str(values[0][0]).strip().lower().startswith(("kakorlap", "industri pertanian"))
+    )
+
+    if is_title_banner:
+        if clean_name == "(2)Rincian Transaksi Harian":
+            return 4
+        if clean_name in config.UNIT_USAHA or clean_name.startswith(("(3)", "(4)", "(5)", "(6)", "(7)")):
+            return 1
+
+    if clean_name == "(2)Rincian Transaksi Harian" and len(values) >= 5:
+        row5 = [str(c).strip().casefold() for c in values[4]]
+        if "transaction id" in row5 or "tanggal" in row5:
+            return 4
+
+    for idx, row in enumerate(values):
+        non_empty = [str(cell).strip() for cell in row if str(cell).strip()]
+        if len(non_empty) < 3:
+            continue
+        row_lower = [c.casefold() for c in non_empty]
+        if any(keyword in row_lower for keyword in ("tanggal", "tgl", "nama barang", "nama produk", "produk", "barang")):
+            return idx
+
+    for idx, row in enumerate(values):
+        non_empty = [str(cell).strip() for cell in row if str(cell).strip()]
+        if len(non_empty) >= 3 and any(c.casefold() == "transaction id" for c in non_empty):
+            return idx
+
+    for idx, row in enumerate(values):
+        if any(str(cell).strip() for cell in row):
+            return idx
+
+    return 0
+
+
 def _ensure_transaction_id_header(worksheet):
     values = _retry_google_call(worksheet.get_all_values)
     if not values:
         return False
 
-    header_row_index = 0
-    for idx, row in enumerate(values):
-        if any(str(cell).strip() for cell in row):
-            header_row_index = idx
-            break
+    header_row_index = _detect_header_row_index(getattr(worksheet, "title", ""), values)
+    header_row_number = header_row_index + 1
+
+    # Bersihkan cell B1 jika baris 1 adalah banner judul yang sebelumnya terisi "Transaction ID"
+    if header_row_index > 0 and len(values) > 0 and len(values[0]) > 1:
+        if str(values[0][1]).strip().casefold() == "transaction id":
+            _retry_google_call(worksheet.update_cell, 1, 2, "")
+            values[0][1] = ""
+
+    while len(values) <= header_row_index:
+        values.append([])
 
     header = [str(cell).strip() for cell in values[header_row_index]]
     normalized = [_normalize_header_label(cell) for cell in header]
+
+    if "transaction id" in normalized:
+        return False
 
     repaired = []
     for index, value in enumerate(header):
@@ -121,17 +168,7 @@ def _ensure_transaction_id_header(worksheet):
     repaired.insert(insert_index, "Transaction ID")
     width = max(len(repaired), len(header))
     padded = repaired + [""] * max(0, width - len(repaired))
-    worksheet.update(range_name=f"A{header_row_index + 1}:{_column_name(width)}{header_row_index + 1}", values=[padded])
-
-    for row_index in range(header_row_index + 1, len(values)):
-        row = values[row_index]
-        if not row:
-            row = [""] * (insert_index + 1)
-        while len(row) < insert_index + 1:
-            row.append("")
-        if len(row) > insert_index:
-            row[insert_index:insert_index + 1] = [""]
-        values[row_index] = row
+    worksheet.update(range_name=f"A{header_row_number}:{_column_name(width)}{header_row_number}", values=[padded])
 
     return True
 

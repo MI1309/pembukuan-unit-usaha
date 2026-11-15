@@ -216,6 +216,22 @@ def jalankan_rekap_mingguan(target_month: str) -> str:
             f"laba/rugi {format_rupiah(summary['laba_rugi_unit'])}, "
             f"penjualan rincian {format_rupiah(summary['total_penjualan_rincian'])}.",
         ])
+    # Compute monthly aggregates
+    month_totals = {
+        'total_pemasukan_unit': sum(p['total_pemasukan_unit'] for p in periods),
+        'total_pengeluaran_unit': sum(p['total_pengeluaran_unit'] for p in periods),
+        'laba_rugi_unit': sum(p['laba_rugi_unit'] for p in periods),
+        'total_penjualan_rincian': sum(p['total_penjualan_rincian'] for p in periods),
+    }
+
+    # Add monthly total line to output
+    lines.append(
+        f"TOTAL BULAN {_MONTH_ABBREVIATIONS[month - 1]} {year}: pemasukan unit {format_rupiah(month_totals['total_pemasukan_unit'])}, "
+        f"pengeluaran unit {format_rupiah(month_totals['total_pengeluaran_unit'])}, "
+        f"laba/rugi {format_rupiah(month_totals['laba_rugi_unit'])}, "
+        f"penjualan rincian {format_rupiah(month_totals['total_penjualan_rincian'])}."
+    )
+
     return "\n".join(lines)
 
 

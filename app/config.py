@@ -1,9 +1,11 @@
 import os
 from pathlib import Path
-from dotenv import load_dotenv
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(PROJECT_ROOT / ".env")
+try:
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / ".env")
+except ImportError:
+    pass
 
 
 def _project_path(name: str, default_name: str) -> str:

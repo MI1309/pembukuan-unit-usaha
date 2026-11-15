@@ -72,6 +72,14 @@ def _safe_append(operation, rows, sheet_names, operation_name):
     )
 
 
+def _column_name(column: int) -> str:
+    name = ""
+    while column > 0:
+        column, remainder = divmod(column - 1, 26)
+        name = chr(65 + remainder) + name
+    return name
+
+
 def _normalize_header_label(value):
     return re.sub(r"\s+", " ", str(value or "").strip()).lower()
 

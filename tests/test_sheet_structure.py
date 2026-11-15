@@ -145,6 +145,31 @@ class SheetStructureTests(unittest.TestCase):
 
         spreadsheet.batch_update.assert_called_once()
 
+    def test_column_name_conversion(self):
+        self.assertEqual(sheet_repo._column_name(1), "A")
+        self.assertEqual(sheet_repo._column_name(26), "Z")
+        self.assertEqual(sheet_repo._column_name(27), "AA")
+        self.assertEqual(sheet_repo._column_name(28), "AB")
+        self.assertEqual(sheet_repo._column_name(702), "ZZ")
+
+    def test_append_rows_atomically_sorts_with_column_name(self):
+        worksheet = unittest.mock.Mock()
+        worksheet.get_all_values.return_value = [
+            ["Header 1", "Header 2", "Header 3"],
+            ["1", "2026-11-15", "Item B"],
+            ["2", "2026-11-14", "Item A"],
+        ]
+        spreadsheet = unittest.mock.Mock()
+        with patch.object(sheet_repo, "get_spreadsheet", return_value=spreadsheet), \
+             patch.object(sheet_repo, "get_sheet", return_value=worksheet), \
+             patch.object(sheet_repo, "_safe_append"), \
+             patch.object(sheet_repo, "invalidate_cache"):
+            sheet_repo.append_rows_atomically([("(4)Ternak Ayam Fazza", ["test"])])
+
+        self.assertEqual(worksheet.update.call_count, 2)
+        self.assertEqual(worksheet.update.call_args_list[0].kwargs.get("range_name"), "A1:D1")
+        self.assertEqual(worksheet.update.call_args_list[1].kwargs.get("range_name"), "A2:D3")
+
 
 if __name__ == "__main__":
     unittest.main()

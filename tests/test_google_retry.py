@@ -86,6 +86,7 @@ class GoogleRetryTests(unittest.TestCase):
     def test_atomic_append_checks_ids_before_retrying_timeout(self):
         transaction_id = "20261115-PRT-0123abcd"
         worksheet = Mock(id=7)
+        worksheet.get_all_values.return_value = [["Header", "Transaction ID"]]
         spreadsheet = Mock()
         spreadsheet.batch_update.side_effect = [GoogleApiError(429), None]
 

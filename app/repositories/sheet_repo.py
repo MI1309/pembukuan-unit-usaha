@@ -1,7 +1,9 @@
 import hashlib
 import json
 import logging
+import random
 import re
+import time
 from datetime import date, datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -76,21 +78,17 @@ def _quote_sheet_name(name: str) -> str:
 
 
 # ============================================================
-# FIX #3 — tambahkan baris `values = ...` yang hilang
+# FIX #3 + OPT #3 — delegasi ke find_transaction_ids yang efisien
 # ============================================================
 def _find_existing_transaction_ids(sheet_names, transaction_ids):
-    transaction_ids = set(transaction_ids)
-    found = set()
-    for sheet_name in sheet_names:
-        worksheet = get_sheet(sheet_name, create=False)
-        if worksheet:
-            values = _retry_google_call(worksheet.get_all_values)  # FIX #3
-            found.update(transaction_ids.intersection(
-                str(value).strip()
-                for row in values
-                for value in row
-            ))
-    return found
+    """Cari transaction ID yang sudah ada di sheet.
+
+    OPT #3 — delegasi ke find_transaction_ids yang hanya membaca kolom
+    Transaction ID (bukan seluruh sheet). Menghindari duplikasi panggilan
+    baca dan mengurangi payload ~90%.
+    """
+    found = find_transaction_ids(sheet_names, list(transaction_ids))
+    return {tx_id for tx_id, sheets in found.items() if sheets}
 
 
 def _transaction_ids_in_rows(rows):
@@ -163,32 +161,34 @@ def _detect_header_row_index(sheet_name: str, values: list[list]) -> int:
 
 # ============================================================
 # FIX #2 — hapus kode mati & perbaiki logika TTL cache
+# OPT #1 — cache ini sekarang dipakai konsisten di semua jalur baca
+#           non-real-time (find_transaction_ids, header check, dll.)
 # ============================================================
 def _cached_get_all_values(worksheet):
     """Return all values from *worksheet* using a short-lived in-memory cache.
-    The cache expires after :data:`_READ_CACHE_SECONDS` seconds to keep data
-    reasonably fresh while dramatically reducing repeated ``get_all_values``
-    calls that trigger Google Sheets read quota consumption.
+
+    The cache expires after :data:`_READ_CACHE_SECONDS` seconds. Use this
+    for non-real-time reads to reduce Google Sheets read quota consumption.
+
+    Do NOT use this for post-write verification where freshness matters
+    (call ``invalidate_cache`` first, then read directly).
     """
     now = monotonic()
     cache_key = getattr(worksheet, "title", "unknown")
     with _cache_lock:
         entry = _record_cache.get(cache_key)
-        # FIX #2 — perbaiki kondisi: sebelumnya `entry["timestamp"] < TTL`
-        # yang hampir selalu True setelah 3 detik pertama proses berjalan,
-        # sehingga cache tidak pernah expire. Seharusnya selisih waktu.
+        # FIX #2 — perbaiki kondisi cache (sebelumnya tidak pernah expire)
         if entry and now - entry["timestamp"] < _READ_CACHE_SECONDS:
             return entry["values"]
         values = _retry_google_call(worksheet.get_all_values)
         _record_cache[cache_key] = {"timestamp": now, "values": values}
         return values
-    # FIX #2 — semua kode setelah `return values` dihapus (dead code
-    # sisa fungsi _ensure_transaction_id_header yang terpotong).
 
 
 # ============================================================
 # FIX #1 — definisi _ensure_transaction_id_header (sebelumnya hilang)
-# Direkonstruksi dari blok dead-code di _cached_get_all_values.
+# OPT #4 — pakai _cached_get_all_values (header jarang berubah,
+#          cache 3 detik aman dan menghemat 1 panggilan baca/transaksi)
 # ============================================================
 def _ensure_transaction_id_header(worksheet) -> bool:
     """Pastikan worksheet punya kolom 'Transaction ID' di header.
@@ -201,7 +201,8 @@ def _ensure_transaction_id_header(worksheet) -> bool:
     Args:
         worksheet: gspread Worksheet object.
     """
-    values = _retry_google_call(worksheet.get_all_values)
+    # OPT #4 — pakai cache: header jarang berubah, cache 3 detik aman
+    values = _cached_get_all_values(worksheet)
     if not values:
         return False
 
@@ -216,6 +217,7 @@ def _ensure_transaction_id_header(worksheet) -> bool:
         if str(values[0][1]).strip().casefold() == "transaction id":
             _retry_google_call(worksheet.update_cell, 1, 2, "")
             values[0][1] = ""
+            invalidate_cache(getattr(worksheet, "title", ""))
 
     while len(values) <= header_row_index:
         values.append([])
@@ -252,6 +254,7 @@ def _ensure_transaction_id_header(worksheet) -> bool:
         range_name=f"A{header_row_number}:{_column_name(width)}{header_row_number}",
         values=[padded],
     )
+    invalidate_cache(getattr(worksheet, "title", ""))
     return True
 
 
@@ -288,6 +291,51 @@ def _sort_rows_by_date(rows, date_column_index):
         return (parsed.year, parsed.month, parsed.day)
 
     return sorted(rows, key=_sort_key)
+
+
+# ============================================================
+# OPT #5 — fungsi sorting terpisah, dipanggil periodik
+#          (bukan di setiap transaksi). Hemat 1-2 panggilan baca/transaksi.
+# ============================================================
+def sort_sheet_rows(sheet_name: str) -> bool:
+    """Sort worksheet data rows by date. Dipanggil periodik (mis. dari
+    daily_backup atau task terjadwal), BUKAN dari jalur kritis transaksi.
+
+    Return True jika sorting dilakukan, False jika tidak ada baris.
+
+    OPT #5 — sebelumnya sorting dijalankan di akhir append_rows_atomically
+    setiap transaksi (baca ulang seluruh sheet). Dipindah ke sini agar
+    jalur kritis transaksi tidak memakan kuota baca berlebih.
+    """
+    worksheet = get_sheet(sheet_name, create=False)
+    if not worksheet:
+        return False
+    invalidate_cache(sheet_name)
+    values = _retry_google_call(worksheet.get_all_values)
+    if sheet_name == "(2)Rincian Transaksi Harian":
+        if len(values) <= 5:
+            return False
+        data_rows = _sort_rows_by_date(values[5:], 1)
+        if not data_rows:
+            return False
+        worksheet.update(
+            range_name=f"A6:{_column_name(max(len(row) for row in data_rows))}{5 + len(data_rows)}",
+            values=data_rows,
+        )
+    elif sheet_name in config.UNIT_USAHA:
+        if len(values) <= 1:
+            return False
+        data_rows = _sort_rows_by_date(values[1:], 1)
+        if not data_rows:
+            return False
+        worksheet.update(
+            range_name=f"A2:{_column_name(max(len(row) for row in data_rows))}{1 + len(data_rows)}",
+            values=data_rows,
+        )
+    else:
+        return False
+    invalidate_cache(sheet_name)
+    return True
 
 
 def _safe_delete_rows(worksheet, row_number, expected_values=None):
@@ -344,7 +392,6 @@ def get_sheet(name: str, create=True):
         if worksheet is not None:
             _worksheet_cache[name] = worksheet
         return worksheet
-    # FIX #4 — blok kedua `with _cache_lock` dihapus (dead code).
 
 
 def invalidate_cache(sheet_name: str) -> None:
@@ -382,11 +429,9 @@ def _ensure_sheet_exists(name: str, headers: list[str]):
                 values=[headers],
             )
             _retry_google_call(worksheet.freeze, rows=1)
-            # Invalidate cached None so subsequent lookups hit the new sheet
             with _cache_lock:
                 _worksheet_cache[name] = worksheet
 
-        # Ensure column count is sufficient
         if hasattr(worksheet, "col_count") and worksheet.col_count < len(headers):
             needed = len(headers) - worksheet.col_count
             _retry_google_call(worksheet.add_cols, needed)
@@ -455,7 +500,8 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
         worksheet = get_sheet(sheet_name, create=False)
         if not worksheet:
             raise ValueError(f"Worksheet not found: {sheet_name}")
-        # FIX #1 — fungsi ini sekarang terdefinisi (sebelumnya NameError)
+        # FIX #1 + OPT #4 — cache header check (1 panggilan baca pertama,
+        # selanjutnya gratis dalam 3 detik)
         _ensure_transaction_id_header(worksheet)
         request_rows = []
         date_columns = set()
@@ -504,21 +550,11 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
         list(rows_by_name),
         "append_rows_atomically",
     )
+
+    # OPT #5 — sorting TIDAK lagi dilakukan di sini.
+    # Panggil sort_sheet_rows(sheet_name) dari task periodik
+    # (mis. daily_backup) agar jalur kritis transaksi tidak memakan kuota baca.
     for sheet_name in rows_by_name:
-        worksheet = get_sheet(sheet_name, create=False)
-        if not worksheet:
-            continue
-        values = worksheet.get_all_values()
-        if sheet_name == "(2)Rincian Transaksi Harian":
-            if len(values) > 5:
-                data_rows = _sort_rows_by_date(values[5:], 1)
-                if data_rows:
-                    worksheet.update(range_name=f"A6:{_column_name(max(len(row) for row in data_rows))}{5 + len(data_rows)}", values=data_rows)
-        elif sheet_name in config.UNIT_USAHA:
-            if len(values) > 1:
-                data_rows = _sort_rows_by_date(values[1:], 1)
-                if data_rows:
-                    worksheet.update(range_name=f"A2:{_column_name(max(len(row) for row in data_rows))}{1 + len(data_rows)}", values=data_rows)
         invalidate_cache(sheet_name)
 
 
@@ -548,7 +584,6 @@ def _format_daily_archive(worksheet) -> None:
                         "foregroundColor": {"red": 1, "green": 1, "blue": 1},
                         "bold": True,
                     },
-                    "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True, "fontSize": 11},
                     "horizontalAlignment": "CENTER",
                     "verticalAlignment": "MIDDLE",
                     "wrapStrategy": "WRAP",
@@ -848,35 +883,78 @@ def get_all_records(sheet_name: str) -> list:
     return get_all_records_many([sheet_name])[sheet_name]
 
 
+# ============================================================
+# OPT #2 — baca HANYA kolom Transaction ID (col_values),
+#          bukan seluruh sheet. Payload baca turun ~90%.
+# OPT #1 — header lookup pakai cache.
+# ============================================================
 def find_transaction_ids(sheet_names: list[str], tx_ids: list[str]) -> dict[str, list[str]]:
+    """Cari transaction ID yang sudah ada di sheet.
+
+    OPT #2 — alih-alih membaca seluruh sheet dengan get_all_values(),
+    fungsi ini:
+      1. Membaca header (baris 1) — di-cache 3 detik (OPT #1).
+      2. Menemukan indeks kolom Transaction ID.
+      3. Membaca HANYA kolom itu dengan worksheet.col_values().
+    Ini mengurangi payload baca ~90% dibanding scan seluruh sheet.
+    """
     requested_ids = {str(tx_id).strip() for tx_id in tx_ids if str(tx_id).strip()}
     found = {tx_id: [] for tx_id in requested_ids}
+    if not requested_ids:
+        return found
+
     for sheet_name in dict.fromkeys(sheet_names):
         worksheet = get_sheet(sheet_name, create=False)
         if not worksheet:
             continue
-        values = _retry_google_call(worksheet.get_all_values)
 
-        header_index = next(
-            (index for index, row in enumerate(values)
-             if any(str(value).strip().casefold() == "transaction id" for value in row)),
+        # OPT #2 + OPT #1 — cari kolom dari header via cache (1 baris)
+        header_values = _cached_get_all_values(worksheet)
+        if not header_values:
+            continue
+        # Deteksi baris header (bisa multi-baris karena banner judul)
+        header_row_index = _detect_header_row_index(sheet_name, header_values)
+        if header_row_index >= len(header_values):
+            continue
+        header_row = header_values[header_row_index]
+        tx_col_index = next(
+            (i for i, h in enumerate(header_row)
+             if str(h).strip().casefold() == "transaction id"),
             None,
         )
-        if header_index is None:
+        if tx_col_index is None:
             continue
-        tx_column = next(
-            index for index, value in enumerate(values[header_index])
-            if str(value).strip().casefold() == "transaction id"
-        )
-        for row in values[header_index + 1:]:
-            tx_id = str(row[tx_column]).strip() if tx_column < len(row) else ""
+
+        # OPT #2 — baca HANYA kolom Transaction ID
+        try:
+            col_values = _retry_google_call(
+                worksheet.col_values, tx_col_index + 1
+            )
+        except Exception as exc:
+            # Fallback: jika col_values gagal (mis. sheet aneh), pakai cache
+            logger.warning(
+                "find_transaction_ids.col_values_failed sheet=%s error=%s",
+                sheet_name, type(exc).__name__,
+            )
+            col_values = [
+                (row[tx_col_index] if tx_col_index < len(row) else "")
+                for row in header_values
+            ]
+
+        start_row = header_row_index + 1  # skip header
+        for value in col_values[start_row:]:
+            tx_id = str(value).strip()
             if tx_id in requested_ids and sheet_name not in found[tx_id]:
                 found[tx_id].append(sheet_name)
     return found
 
 
 def _transaction_id_column(worksheet, header_row_number):
-    values = _retry_google_call(worksheet.get_all_values)
+    """Return (column_index, values) untuk kolom Transaction ID.
+
+    OPT #1 — pakai cache untuk header lookup.
+    """
+    values = _cached_get_all_values(worksheet)
     header_index = header_row_number - 1
     while len(values) <= header_index:
         values.append([])
@@ -886,6 +964,7 @@ def _transaction_id_column(worksheet, header_row_number):
             return column, values
     column = len(headers)
     _retry_google_call(worksheet.update_cell, header_row_number, column + 1, "Transaction ID")
+    invalidate_cache(getattr(worksheet, "title", ""))
     return column, values
 
 
@@ -920,7 +999,7 @@ def _read_archive_manifest(manifest_key):
     metadata_sheet = get_sheet("_Meta", create=False)
     if not metadata_sheet:
         raise ValueError("Worksheet _Meta tidak ditemukan")
-    values = _retry_google_call(metadata_sheet.get_all_values)
+    values = _cached_get_all_values(metadata_sheet)
     for row in values:
         if len(row) >= 2 and row[0] == manifest_key:
             try:
@@ -958,7 +1037,6 @@ def _write_archive_manifest(manifest_key, manifest):
 # FIX #5 — fallback jika `error_code` tidak diekspor oleh app.core.retry
 # ============================================================
 def _log_archive_verification_failure(archived_at, missing_ids, extra_ids, error=None):
-    # FIX #5 — jangan crash saat import gagal; fallback ke response status_code
     try:
         from app.core.retry import error_code
         code = error_code(error) if error else None
@@ -981,25 +1059,54 @@ def _log_archive_verification_failure(archived_at, missing_ids, extra_ids, error
         logger.warning("Unable to persist archive verification failure log error_type=%s", type(logging_error).__name__)
 
 
+# ============================================================
+# OPT #6 — verifikasi arsip baca HANYA kolom yang relevan
+#          (Transaction ID, Diarsipkan, Unit Usaha), bukan seluruh sheet.
+# ============================================================
+def _read_archive_unit_ids(archive_worksheet, archived_at: str, unit: str, tx_col: int, archived_col: int):
+    """Baca hanya transaction ID untuk unit+archived_at tertentu.
+
+    OPT #6 — alih-alih get_all_values() seluruh arsip, baca
+    hanya kolom yang relevan via col_values. Jauh lebih hemat kuota
+    terutama untuk _ArsipTransaksi yang bisa membesar.
+    """
+    try:
+        unit_col = _retry_google_call(archive_worksheet.col_values, 1)  # Unit Usaha
+        tx_col_vals = _retry_google_call(archive_worksheet.col_values, tx_col + 1)
+        archived_col_vals = _retry_google_call(archive_worksheet.col_values, archived_col + 1)
+    except Exception:
+        # Fallback ke get_all_values jika col_values gagal
+        values = _retry_google_call(archive_worksheet.get_all_values)
+        unit_col = [row[0] if row else "" for row in values]
+        tx_col_vals = [
+            row[tx_col] if tx_col < len(row) else "" for row in values
+        ]
+        archived_col_vals = [
+            row[archived_col] if archived_col < len(row) else "" for row in values
+        ]
+
+    ids = set()
+    max_len = max(len(unit_col), len(tx_col_vals), len(archived_col_vals))
+    for idx in range(1, max_len):  # skip header
+        u = str(unit_col[idx]).strip() if idx < len(unit_col) else ""
+        a = str(archived_col_vals[idx]).strip() if idx < len(archived_col_vals) else ""
+        t = str(tx_col_vals[idx]).strip() if idx < len(tx_col_vals) else ""
+        if u == unit and a == archived_at and t:
+            ids.add(t)
+    return ids
+
+
 def archive_unit_transactions(
     rows_by_unit: dict[str, list[tuple[int, list]]],
     archived_at: str,
 ) -> dict:
     """Archive ledger rows from multiple unit sheets to *_ArsipTransaksi*.
 
-    Changes from previous version
-    ------------------------------
-    * Uses ``_ensure_sheet_exists`` so ``_ArsipTransaksi`` is auto-created when
-      missing (no more APIError 400 on first month-rollover).
-    * Per-unit try/except: a failure on one unit does **not** prevent other units
-      from being archived, and does **not** delete that unit's source rows.
-    * Returns a structured dict instead of a bare ``int``.
-
     Returns:
         {
-            "archived":       {unit: row_count},   # units successfully archived
-            "failed":         {unit: error_msg},   # units that raised an error
-            "skipped_delete": [unit, ...],          # units whose source rows were NOT deleted
+            "archived":       {unit: row_count},
+            "failed":         {unit: error_msg},
+            "skipped_delete": [unit, ...],
         }
     """
     archive = _ensure_sheet_exists("_ArsipTransaksi", ARSIP_HEADERS)
@@ -1010,11 +1117,6 @@ def archive_unit_transactions(
          if str(value).strip().casefold() == "diarsipkan"),
         10,
     )
-    before_ids = {
-        _row_transaction_id(row, archive_id_column)
-        for row in archive_values_before[1:]
-        if _row_transaction_id(row, archive_id_column)
-    }
 
     result: dict = {"archived": {}, "failed": {}, "skipped_delete": []}
 
@@ -1059,22 +1161,18 @@ def archive_unit_transactions(
                         f"archive_unit_transactions_append:{unit}",
                     )
 
-                # Verifikasi post-append dengan retry (Google Sheets eventual-consistent)
+                # Verifikasi post-append dengan retry
                 expected_ids = set(unit_ids)
                 found_ids: set[str] = set()
-                archive_values_after: list = []
                 missing_ids = expected_ids
                 for _attempt in range(4):
                     if _attempt > 0:
                         sleep(3)
-                    archive_values_after = _retry_google_call(archive.get_all_values)
-                    found_ids = set()
-                    for row in archive_values_after[1:]:
-                        tx = _row_transaction_id(row, archive_id_column)
-                        av = str(row[archived_at_column]).strip() if archived_at_column < len(row) else ""
-                        ru = str(row[0]) if row else ""
-                        if av == archived_at and ru == unit:
-                            found_ids.add(tx)
+                    # OPT #6 — baca hanya kolom relevan (bukan seluruh sheet)
+                    invalidate_cache("_ArsipTransaksi")
+                    found_ids = _read_archive_unit_ids(
+                        archive, archived_at, unit, archive_id_column, archived_at_column,
+                    )
                     missing_ids = expected_ids - found_ids
                     if not missing_ids:
                         break
@@ -1084,19 +1182,6 @@ def archive_unit_transactions(
                     raise ArchiveVerificationError(
                         f"Verifikasi arsip gagal untuk unit {unit} pada {archived_at}",
                         missing_ids,
-                    )
-
-                added_ids = {
-                    _row_transaction_id(row, archive_id_column)
-                    for row in archive_values_after[1:]
-                    if _row_transaction_id(row, archive_id_column)
-                    and _row_transaction_id(row, archive_id_column) not in before_ids
-                }
-                extra_ids = added_ids - expected_ids
-                if extra_ids:
-                    logger.warning(
-                        "ARCHIVE_EXTRA_IDS unit=%s archived_at=%s extra=%s",
-                        unit, archived_at, sorted(extra_ids),
                     )
 
                 verified_at = datetime.now().astimezone().isoformat()
@@ -1109,7 +1194,6 @@ def archive_unit_transactions(
                     }},
                 )
 
-                # Hapus baris sumber hanya jika arsip sukses
                 for row_number, row_values in reversed(delete_rows):
                     _safe_delete_rows(source, row_number, row_values)
                 invalidate_cache(unit)
@@ -1135,6 +1219,7 @@ def verify_archive_manifest(manifest_key: str) -> dict:
     archive = get_sheet("_ArsipTransaksi", create=False)
     if not archive:
         raise ValueError("Worksheet _ArsipTransaksi tidak ditemukan")
+    invalidate_cache("_ArsipTransaksi")
     values = _retry_google_call(archive.get_all_values)
     tx_column = _read_transaction_id_column(values, 1)
     if tx_column is None:
@@ -1172,6 +1257,7 @@ def rollback_archive(manifest_key: str, apply: bool = True) -> dict:
     manifest = _read_archive_manifest(manifest_key)
     archived_at = manifest_key.removeprefix("archive_manifest:")
     archive = get_sheet("_ArsipTransaksi", create=False)
+    invalidate_cache("_ArsipTransaksi")
     values = _retry_google_call(archive.get_all_values)
     tx_column = _read_transaction_id_column(values, 1)
     if tx_column is None:

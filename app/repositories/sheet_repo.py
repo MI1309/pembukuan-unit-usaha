@@ -737,7 +737,8 @@ def find_transaction_ids(sheet_names: list[str], tx_ids: list[str]) -> dict[str,
         worksheet = get_sheet(sheet_name, create=False)
         if not worksheet:
             continue
-        
+        values = _retry_google_call(worksheet.get_all_values)
+
         header_index = next(
             (index for index, row in enumerate(values)
              if any(str(value).strip().casefold() == "transaction id" for value in row)),
@@ -757,7 +758,7 @@ def find_transaction_ids(sheet_names: list[str], tx_ids: list[str]) -> dict[str,
 
 
 def _transaction_id_column(worksheet, header_row_number):
-    
+    values = _retry_google_call(worksheet.get_all_values)
     header_index = header_row_number - 1
     while len(values) <= header_index:
         values.append([])

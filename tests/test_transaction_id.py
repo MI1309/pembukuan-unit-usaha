@@ -47,9 +47,30 @@ class TransactionIdTests(unittest.TestCase):
     def test_unit_sheet_mapping_keeps_emran_separate_from_fazza(self):
         self.assertEqual(sales_service.get_unit_sheet("ayam emran"), "(5)Ternak Ayam Emran")
         self.assertEqual(sales_service.get_unit_sheet("telur ayam fazza"), "(4)Ternak Ayam Fazza")
+        self.assertEqual(sales_service.get_unit_sheet("telur ayam emran"), "(5)Ternak Ayam Emran")
+        self.assertEqual(sales_service.get_unit_sheet("ayam fazza"), "(4)Ternak Ayam Fazza")
 
     def test_ledger_header_uses_transaction_id_label(self):
         self.assertEqual(setup_reference_structure.LEDGER_HEADERS[-1], "Transaction ID")
+        self.assertEqual(setup_reference_structure.LEDGER_HEADERS[0], "Tanggal")
+
+    def test_unit_row_uses_canonical_ledger_layout(self):
+        sale = {
+            "tanggal": date(2026, 11, 15),
+            "produk": "Telur Ayam Emran",
+            "keterangan": "Jual ke P3",
+            "kuantitas": 2,
+            "unit_kuantitas": "KG",
+            "satuan": 30000,
+            "penjualan": 60000,
+            "is_penjualan": True,
+            "transaction_id": "20261115-TAE-1234abcd",
+            "unit": "(5)Ternak Ayam Emran",
+        }
+        row = sales_service._save_sale(sale)[0][1]
+        self.assertEqual(row[0], date(2026, 11, 15))
+        self.assertEqual(row[-1], "20261115-TAE-1234abcd")
+        self.assertEqual(row[1], "Telur Ayam Emran")
 
     def test_sort_rows_by_date_keeps_oldest_dates_first(self):
         rows = [

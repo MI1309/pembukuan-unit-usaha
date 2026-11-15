@@ -83,17 +83,36 @@ def _worksheet(spreadsheet, name: str, apply: bool):
 
 def _repair_existing_header_row(header_row_values: list[str]) -> list[str]:
     cleaned = [str(value).strip() for value in header_row_values]
-    for index, header in enumerate(cleaned):
-        normalized = header.lower()
-        if normalized in {"nomor", "no", "no.", "id transaksi"}:
-            cleaned[index] = "Transaction ID"
-    if "Transaction ID" not in cleaned:
-        if "Pengeluaran (Rp)" in cleaned:
-            insert_at = cleaned.index("Pengeluaran (Rp)") + 1
-            cleaned.insert(insert_at, "Transaction ID")
-        else:
-            cleaned.append("Transaction ID")
-    return cleaned
+    normalized = [re.sub(r"\s+", " ", value).strip().lower() for value in cleaned]
+
+    repaired: list[str] = []
+    legacy_tx_positions = [idx for idx, value in enumerate(normalized) if value == "transaction id"]
+    for index, value in enumerate(cleaned):
+        label = normalized[index]
+        if label in {"nomor", "no", "no.", "id transaksi"}:
+            continue
+        if label == "transaction id":
+            if not legacy_tx_positions:
+                repaired.append("Transaction ID")
+            continue
+        repaired.append(value)
+
+    if "transaction id" in {re.sub(r"\s+", " ", value).strip().lower() for value in repaired}:
+        tx_index = next(index for index, value in enumerate(repaired) if re.sub(r"\s+", " ", value).strip().lower() == "transaction id")
+        repaired.pop(tx_index)
+
+    insert_at = len(repaired)
+    for index, value in enumerate(repaired):
+        if re.sub(r"\s+", " ", value).strip().lower() == "sisa saldo":
+            insert_at = index + 1
+            break
+    if insert_at == len(repaired):
+        for index, value in enumerate(repaired):
+            if re.sub(r"\s+", " ", value).strip().lower() == "pengeluaran (rp)":
+                insert_at = index + 1
+                break
+    repaired.insert(insert_at, "Transaction ID")
+    return repaired
 
 
 def repair_existing_sheet_layout(sheet_name: str, apply: bool = False) -> dict:
@@ -115,8 +134,10 @@ def repair_existing_sheet_layout(sheet_name: str, apply: bool = False) -> dict:
     if not apply:
         return {"sheet": sheet_name, "status": "dry_run", "header": repaired}
 
-    worksheet.update(range_name=f"A{header_row_number}:{_column_name(len(repaired))}{header_row_number}", values=[repaired])
-    worksheet.format(f"A{header_row_number}:{_column_name(len(repaired))}{header_row_number}", HEADER_STYLE)
+    width = max(len(repaired), len(header_row))
+    padded = repaired + [""] * max(0, width - len(repaired))
+    worksheet.update(range_name=f"A{header_row_number}:{_column_name(width)}{header_row_number}", values=[padded])
+    worksheet.format(f"A{header_row_number}:{_column_name(width)}{header_row_number}", HEADER_STYLE)
     return {"sheet": sheet_name, "status": "updated", "header": repaired}
 
 
@@ -207,6 +228,9 @@ def setup_reference_structure(apply: bool = False, sheet_name: str | None = None
     skipped = 0
     for spec in specs:
         try:
+            repair_result = repair_existing_sheet_layout(spec["name"], apply=apply)
+            if apply and repair_result.get("status") in {"updated", "dry_run"}:
+                print(f"{spec['name']!r}: header repair -> {repair_result['status']}: {repair_result.get('header', [])}")
             result = _ensure_spec(spreadsheet, spec, apply)
         except Exception as error:
             result = f"ERROR: {error}"

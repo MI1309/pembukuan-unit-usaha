@@ -28,9 +28,11 @@ def get_unit_sheet(produk_nama: str) -> str:
     product = produk_nama.lower()
     if "emran" in product:
         return "(5)Ternak Ayam Emran"
+    if "fazza" in product:
+        return "(4)Ternak Ayam Fazza"
     if "lele" in product or "ikan" in product:
         return "(6)Perikanan "
-    if "fazza" in product or "ayam" in product or "telur" in product:
+    if "ayam" in product or "telur" in product:
         return "(4)Ternak Ayam Fazza"
     if "anggur" in product:
         return "(3)Pertanian "
@@ -179,7 +181,7 @@ def _save_sale(sale: dict) -> list[tuple[str, list]]:
     balance_change = sale["penjualan"] if is_sale else -sale["penjualan"]
     quantity_text = f"{sale['kuantitas']:g} {sale['unit_kuantitas']}".strip()
     unit_row = [
-        "", sale["tanggal"], sale["produk"],
+        sale["tanggal"], sale["produk"],
         sale["keterangan"], quantity_text, sale["satuan"],
         income, expense, balance_change, sale["transaction_id"],
     ]

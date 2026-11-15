@@ -89,37 +89,41 @@ def _ensure_transaction_id_header(worksheet):
 
     header = [str(cell).strip() for cell in values[header_row_index]]
     normalized = [_normalize_header_label(cell) for cell in header]
-    tx_positions = [idx for idx, value in enumerate(normalized) if value == "transaction id"]
 
-    if not tx_positions:
-        insert_index = len(header)
-        for idx, value in enumerate(normalized):
-            if value == "pengeluaran (rp)":
+    repaired = []
+    for index, value in enumerate(header):
+        label = normalized[index]
+        if label in {"nomor", "no", "no.", "id transaksi"}:
+            continue
+        if label == "transaction id":
+            continue
+        repaired.append(value)
+
+    insert_index = len(repaired)
+    for idx, value in enumerate(repaired):
+        if _normalize_header_label(value) == "sisa saldo":
+            insert_index = idx + 1
+            break
+    if insert_index == len(repaired):
+        for idx, value in enumerate(repaired):
+            if _normalize_header_label(value) == "pengeluaran (rp)":
                 insert_index = idx + 1
                 break
-        header.insert(insert_index, "Transaction ID")
-        for row_index in range(header_row_index + 1, len(values)):
-            values[row_index] = values[row_index] + [""] * max(0, insert_index + 1 - len(values[row_index]))
-            if len(values[row_index]) > insert_index:
-                values[row_index][insert_index:insert_index + 1] = [""]
-        worksheet.update(range_name=f"A{header_row_index + 1}:{_column_name(len(header))}{header_row_index + 1}", values=[header])
-        for row_index in range(header_row_index + 1, min(len(values), header_row_index + 200)):
-            if len(values[row_index]) <= insert_index:
-                values[row_index].extend([""] * (insert_index + 1 - len(values[row_index])))
-        return True
 
-    first_tx_index = tx_positions[0]
-    if len(tx_positions) > 1:
-        for pos in reversed(tx_positions[1:]):
-            header.pop(pos)
-            for row_index in range(header_row_index + 1, len(values)):
-                if len(values[row_index]) > pos:
-                    del values[row_index][pos]
-        worksheet.update(range_name=f"A{header_row_index + 1}:{_column_name(len(header))}{header_row_index + 1}", values=[header])
+    repaired.insert(insert_index, "Transaction ID")
+    width = max(len(repaired), len(header))
+    padded = repaired + [""] * max(0, width - len(repaired))
+    worksheet.update(range_name=f"A{header_row_index + 1}:{_column_name(width)}{header_row_index + 1}", values=[padded])
 
-    if normalized[first_tx_index] != "transaction id":
-        header[first_tx_index] = "Transaction ID"
-        worksheet.update(range_name=f"A{header_row_index + 1}:{_column_name(len(header))}{header_row_index + 1}", values=[header])
+    for row_index in range(header_row_index + 1, len(values)):
+        row = values[row_index]
+        if not row:
+            row = [""] * (insert_index + 1)
+        while len(row) < insert_index + 1:
+            row.append("")
+        if len(row) > insert_index:
+            row[insert_index:insert_index + 1] = [""]
+        values[row_index] = row
 
     return True
 
@@ -139,9 +143,19 @@ def _parse_sheet_date(value):
 
 
 def _sort_rows_by_date(rows, date_column_index):
+    def _date_index_for(row):
+        candidates = [date_column_index, max(0, date_column_index - 1), 0, 1, 2]
+        for idx in candidates:
+            if idx < len(row) and _parse_sheet_date(row[idx]) is not None:
+                return idx
+        for idx, value in enumerate(row):
+            if _parse_sheet_date(value) is not None:
+                return idx
+        return max(0, date_column_index - 1)
+
     def _sort_key(row):
-        date_value = row[date_column_index - 1] if len(row) > date_column_index - 1 else ""
-        parsed = _parse_sheet_date(date_value)
+        idx = _date_index_for(row)
+        parsed = _parse_sheet_date(row[idx] if idx < len(row) else "")
         if parsed is None:
             return (9999, 12, 31)
         return (parsed.year, parsed.month, parsed.day)
@@ -309,7 +323,7 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
                     worksheet.update(range_name=f"A6:{_column_name(max(len(row) for row in data_rows))}{5 + len(data_rows)}", values=data_rows)
         elif sheet_name in config.UNIT_USAHA:
             if len(values) > 1:
-                data_rows = _sort_rows_by_date(values[1:], 2)
+                data_rows = _sort_rows_by_date(values[1:], 1)
                 if data_rows:
                     worksheet.update(range_name=f"A2:{_column_name(max(len(row) for row in data_rows))}{1 + len(data_rows)}", values=data_rows)
         invalidate_cache(sheet_name)

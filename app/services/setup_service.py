@@ -2,15 +2,12 @@ import re
 
 from app.repositories import sheet_repo
 from app.config import config
-from app.setup_reference_structure import setup_reference_structure
+from app.setup_reference_structure import LEDGER_HEADERS, setup_reference_structure
 
 def setup_sheet_unit(sheet_name):
     """Create or format a unit ledger using the shared 9-column layout."""
     sheet = sheet_repo.get_sheet(sheet_name)
-    headers = [
-        'Nomor', 'Tanggal', 'Nama Barang/Jasa /Produk', 'Keterangan Transaksi',
-        'Kuantitas', 'Satuan', 'Pemasukan (Rp)', 'Pengeluaran (Rp)', 'Sisa Saldo',
-    ]
+    headers = LEDGER_HEADERS
     values = sheet.get_all_values()
     if not values:
         sheet.update('A1:I2', [[f"Kakorlap Unit Usaha {sheet_name}", '', '', '', '', '', '', '', ''], headers])
@@ -42,14 +39,24 @@ def setup_sheet_unit(sheet_name):
             'fields': 'userEnteredFormat',
         }},
         {'repeatCell': {
-            'range': {'sheetId': sheet.id, 'startRowIndex': 1, 'startColumnIndex': 1, 'endColumnIndex': 2},
+            'range': {'sheetId': sheet.id, 'startRowIndex': 2, 'startColumnIndex': 0, 'endColumnIndex': 1},
             'cell': {'userEnteredFormat': {'numberFormat': {'type': 'DATE', 'pattern': 'dd mmm yyyy'}}},
             'fields': 'userEnteredFormat.numberFormat',
         }},
         {'repeatCell': {
-            'range': {'sheetId': sheet.id, 'startRowIndex': 1, 'startColumnIndex': 5, 'endColumnIndex': 9},
+            'range': {'sheetId': sheet.id, 'startRowIndex': 2, 'startColumnIndex': 4, 'endColumnIndex': 8},
             'cell': {'userEnteredFormat': {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0'}}},
             'fields': 'userEnteredFormat.numberFormat',
+        }},
+        {'repeatCell': {
+            'range': {'sheetId': sheet.id, 'startRowIndex': 2, 'startColumnIndex': 5, 'endColumnIndex': 8},
+            'cell': {'userEnteredFormat': {'numberFormat': {'type': 'CURRENCY', 'pattern': '"Rp" #,##0'}}},
+            'fields': 'userEnteredFormat.numberFormat',
+        }},
+        {'repeatCell': {
+            'range': {'sheetId': sheet.id, 'startRowIndex': 2, 'startColumnIndex': 4, 'endColumnIndex': 8},
+            'cell': {'userEnteredFormat': {'horizontalAlignment': 'RIGHT'}},
+            'fields': 'userEnteredFormat.horizontalAlignment',
         }},
         {'updateSheetProperties': {
             'properties': {'sheetId': sheet.id, 'gridProperties': {'frozenRowCount': 2}},
@@ -66,7 +73,7 @@ def setup_sheet_unit(sheet_name):
                 }},
                 'fields': 'userEnteredFormat.backgroundColor,userEnteredFormat.textFormat',
             }})
-    widths = [110, 125, 230, 290, 115, 105, 145, 145, 145]
+    widths = [125, 230, 290, 125, 120, 150, 150, 150, 190]
     requests.extend({
         'updateDimensionProperties': {
             'range': {

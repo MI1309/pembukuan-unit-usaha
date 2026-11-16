@@ -4,7 +4,7 @@ from unittest.mock import patch
 from app.repositories import sheet_repo
 from app.services import sales_service
 from app.services import setup_service
-from app.setup_reference_structure import SPECS, _ensure_spec, _looks_like_legacy_sale
+from app.setup_reference_structure import LEDGER_HEADERS, SPECS, _ensure_spec, _looks_like_legacy_sale
 
 
 class SheetStructureTests(unittest.TestCase):
@@ -137,7 +137,44 @@ class SheetStructureTests(unittest.TestCase):
         with patch.object(sheet_repo, "get_sheet", return_value=worksheet):
             setup_service.setup_sheet_unit("(3)Pertanian ")
 
+        worksheet.update.assert_called_with('A2:I2', [LEDGER_HEADERS])
         spreadsheet.batch_update.assert_called_once()
+
+    def test_unit_ledger_append_formats_date_amount_and_id_columns(self):
+        sheet_name = "(4)Ternak Ayam Fazza"
+
+        self.assertEqual(
+            [header.casefold() for header in LEDGER_HEADERS[-2:]],
+            ["sisa saldo", "transaction id"],
+        )
+        self.assertEqual(
+            sheet_repo._appended_cell_format(sheet_name, 0)["numberFormat"]["type"],
+            "DATE",
+        )
+        self.assertEqual(
+            sheet_repo._appended_cell_format(sheet_name, 4)["numberFormat"]["type"],
+            "NUMBER",
+        )
+        self.assertEqual(
+            sheet_repo._appended_cell_format(sheet_name, 7)["numberFormat"]["type"],
+            "CURRENCY",
+        )
+        self.assertNotIn("numberFormat", sheet_repo._appended_cell_format(sheet_name, 8))
+
+    def test_transaction_id_header_repairs_swapped_balance_and_id_labels(self):
+        sheet_name = "(4)Ternak Ayam Fazza"
+        worksheet = unittest.mock.Mock(title=sheet_name)
+        old_headers = [*LEDGER_HEADERS[:7], "Transaction ID", "Sisa Saldo"]
+        values = [["Kakorlap Unit Usaha Fazza"], old_headers]
+
+        with patch.object(sheet_repo, "_cached_get_all_values", return_value=values), \
+             patch.object(sheet_repo, "invalidate_cache"):
+            repaired = sheet_repo._ensure_transaction_id_header(worksheet)
+
+        self.assertTrue(repaired)
+        worksheet.update.assert_called_once_with(
+            range_name="A2:I2", values=[LEDGER_HEADERS],
+        )
 
     def test_employee_and_recap_formatting_uses_one_batch(self):
         spreadsheet = unittest.mock.Mock()

@@ -50,6 +50,22 @@ class TransactionIdTests(unittest.TestCase):
         self.assertEqual(sales_service.get_unit_sheet("telur ayam emran"), "(5)Ternak Ayam Emran")
         self.assertEqual(sales_service.get_unit_sheet("ayam fazza"), "(4)Ternak Ayam Fazza")
 
+    def test_explicit_purchase_unit_overrides_parser_unit(self):
+        raw_purchase = {
+            "produk": "Pakan ikan",
+            "keterangan": "",
+            "kuantitas": 2,
+            "satuan": "KG",
+            "total_harga": 50000,
+            "is_penjualan": False,
+            "unit_usaha": "(4)Ternak Ayam Fazza",
+        }
+
+        purchase, error = sales_service._normalise_sale(raw_purchase, "beli pakan 2 kg 50000 untuk perikanan")
+
+        self.assertIsNone(error)
+        self.assertEqual(purchase["unit"], "(6)Perikanan ")
+
     def test_ledger_header_uses_transaction_id_label(self):
         self.assertEqual(setup_reference_structure.LEDGER_HEADERS[-1], "Transaction ID")
         self.assertEqual(setup_reference_structure.LEDGER_HEADERS[0], "Tanggal")
@@ -90,7 +106,10 @@ class TransactionIdTests(unittest.TestCase):
         ]
         tx_id = "20261115-TAF-0123abcd"
 
-        with patch.object(sheet_repo, "get_sheet", return_value=worksheet):
+        with (
+            patch.object(sheet_repo, "get_sheet", return_value=worksheet),
+            patch.object(sheet_repo, "_batch_get_sheet_columns", return_value={"ledger": ["Transaction ID", ""]}),
+        ):
             result = sheet_repo.find_transaction_ids(["ledger"], [tx_id])
 
         self.assertEqual(result, {tx_id: []})
@@ -105,7 +124,7 @@ class TransactionIdTests(unittest.TestCase):
         log_event = Mock()
 
         with patch.object(sales_service, "analyze_sales", return_value={"transaksi": [{}]}), \
-             patch.object(sales_service, "_normalise_sale", side_effect=lambda raw: (dict(self.sale), None)), \
+             patch.object(sales_service, "_normalise_sale", side_effect=lambda raw, message="": (dict(self.sale), None)), \
              patch.object(sheet_repo, "find_transaction_ids", side_effect=lookup_results), \
              patch.object(sheet_repo, "append_rows_atomically", append), \
              patch.object(sales_service, "_maybe_archive_unit_transactions"), \

@@ -61,6 +61,24 @@ def _resolve_unit_sheet(value: str) -> str | None:
     return None
 
 
+def _explicit_unit_sheet(message: str) -> str | None:
+    text = re.sub(r"\s+", " ", str(message or "").strip().lower())
+    aliases = {
+        "(3)pertanian": ["pertanian"],
+        "(4)ternak ayam fazza": ["ternak ayam fazza", "ayam fazza", "fazza"],
+        "(5)ternak ayam emran": ["ternak ayam emran", "ayam emran", "emran"],
+        "(6)perikanan": ["perikanan"],
+        "(7)pabrik pupuk": ["pabrik pupuk"],
+    }
+    matches = []
+    for unit in config.UNIT_USAHA:
+        normalized_unit = re.sub(r"\s+", " ", unit.strip().lower())
+        unit_aliases = aliases.get(normalized_unit, [normalized_unit])
+        if any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", text) for alias in unit_aliases):
+            matches.append(unit)
+    return matches[0] if len(matches) == 1 else None
+
+
 def _resolve_product(raw: dict) -> dict | None:
     product_text = f"{raw.get('produk', '')} {raw.get('keterangan', '')}".lower()
     for item in config.KATALOG:
@@ -69,7 +87,7 @@ def _resolve_product(raw: dict) -> dict | None:
     return None
 
 
-def _normalise_sale(raw: dict) -> tuple[dict | None, str | None]:
+def _normalise_sale(raw: dict, message: str = "") -> tuple[dict | None, str | None]:
     if not isinstance(raw, dict):
         return None, None
     is_sale = raw.get("is_penjualan") is not False and str(raw.get("jenis", "")).strip().lower() not in {"pembelian", "pengeluaran"}
@@ -77,7 +95,9 @@ def _normalise_sale(raw: dict) -> tuple[dict | None, str | None]:
     product_name = product["nama"] if product else str(raw.get("produk", "Barang pembelian")).strip()
     if is_sale and not product:
         return None, f"{raw.get('produk', 'Produk tidak dikenal')} — produk penjualan tidak dikenal"
-    unit_sheet = get_unit_sheet(product_name) if is_sale else _resolve_unit_sheet(raw.get("unit_usaha", ""))
+    unit_sheet = get_unit_sheet(product_name) if is_sale else (
+        _explicit_unit_sheet(message) or _resolve_unit_sheet(raw.get("unit_usaha", ""))
+    )
     if not is_sale and not unit_sheet:
         return None, f"{product_name} — sebutkan unit usaha pembelian (Pertanian, Ternak Ayam Fazza, Ternak Ayam Emran, Perikanan, atau Pabrik Pupuk)"
     try:
@@ -236,7 +256,7 @@ def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tu
     prepared = []
     failed = []
     for raw in raw_items:
-        sale, error = _normalise_sale(raw)
+        sale, error = _normalise_sale(raw, message)
         if error:
             failed.append(error)
         elif sale:

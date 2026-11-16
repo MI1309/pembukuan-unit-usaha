@@ -6,7 +6,7 @@ from threading import RLock
 from typing import Literal
 
 from app.config import config
-from app.core.utils import format_tanggal_id, now_tz, parse_amount
+from app.core.utils import format_tanggal_id, now_tz, parse_amount, parse_date
 from app.repositories import sheet_repo
 
 logger = logging.getLogger(__name__)
@@ -90,6 +90,53 @@ def is_subtotal_row(row: list) -> bool:
         if index < len(row)
     )
 
+def _subtotal_label(row: list, description_index: int | None) -> str:
+    indices = list(dict.fromkeys(index for index in (description_index, 2, 3) if index is not None))
+    return next((
+        str(row[index]).strip()
+        for index in indices
+        if index < len(row)
+        and str(row[index]).strip().upper().startswith(("SUBTOTAL MINGGU", "TOTAL BULAN"))
+    ), "")
+
+def _column_indices(sheet_name: str, values: list[list]) -> dict[str, int | None]:
+    header_index = sheet_repo._detect_header_row_index(sheet_name, values)
+    header = values[header_index] if 0 <= header_index < len(values) else []
+    normalized = [sheet_repo._normalize_header_label(cell) for cell in header]
+    has_header = any(value in {"tanggal", "tgl", "keterangan", "keterangan transaksi"} for value in normalized)
+    if not has_header:
+        header_index = -1
+        normalized = []
+
+    def find_column(*labels):
+        return next((index for index, value in enumerate(normalized) if value in labels), None)
+
+    is_daily = sheet_name == "(2)Rincian Transaksi Harian"
+    return {
+        "header": header_index,
+        "date": find_column("tanggal", "tgl") if normalized else 0,
+        "income": find_column("pemasukan (rp)", "pemasukan") if normalized else None,
+        "expense": find_column("pengeluaran (rp)", "pengeluaran") if normalized else None,
+        "balance": find_column("sisa saldo", "saldo") if normalized else None,
+        "description": find_column("keterangan transaksi", "keterangan"),
+        "tx_id": find_column("transaction id"),
+        "daily": is_daily,
+    }
+
+def _resolved_columns(sheet_name: str, values: list[list]) -> dict[str, int | None]:
+    columns = _column_indices(sheet_name, values)
+    if columns["income"] is None:
+        columns["income"] = 5
+    if columns["expense"] is None:
+        columns["expense"] = 6
+    if columns["balance"] is None and not columns["daily"]:
+        columns["balance"] = 7
+    if columns["description"] is None:
+        columns["description"] = 2
+    if columns["tx_id"] is None:
+        columns["tx_id"] = 8 if not columns["daily"] else 7
+    return columns
+
 def compute_period_total(sheet_name: str, period: Period) -> PeriodTotal:
     """
     - Baca get_all_values() sekali
@@ -108,36 +155,44 @@ def compute_period_total(sheet_name: str, period: Period) -> PeriodTotal:
     if not values:
         return PeriodTotal(period, 0, 0, 0)
     
-    # Ledger unit usaha (0-based): 
-    # 0: Tanggal, 1: Produk, 2: Keterangan, 3: Qty, 4: Satuan, 5: Pemasukan, 6: Pengeluaran, 7: Saldo, 8: TxID
-    
+    columns = _resolved_columns(sheet_name, values)
     total_pemasukan = 0
     total_pengeluaran = 0
     last_saldo = 0
     found_in_period = False
-    
-    # Find last saldo before period start
     last_saldo_before = 0
+    last_before_date = None
+    last_period_date = None
     
-    for row in values:
+    for row_index, row in enumerate(values):
+        if row_index <= columns["header"]:
+            continue
         if is_subtotal_row(row):
             continue
-            
-        row_date = sheet_repo._parse_sheet_date(row[0] if len(row) > 0 else "")
+
+        date_index = columns["date"] or 0
+        row_date = parse_date(row[date_index] if len(row) > date_index else "")
         if not row_date:
             continue
-            
-        row_pemasukan = parse_amount(row[5]) if len(row) > 5 else 0
-        row_pengeluaran = parse_amount(row[6]) if len(row) > 6 else 0
-        row_saldo = parse_amount(row[7]) if len(row) > 7 else 0
+
+        income_index = columns["income"]
+        expense_index = columns["expense"]
+        balance_index = columns["balance"]
+        row_pemasukan = parse_amount(row[income_index]) if income_index is not None and len(row) > income_index else 0
+        row_pengeluaran = parse_amount(row[expense_index]) if expense_index is not None and len(row) > expense_index else 0
+        row_saldo = parse_amount(row[balance_index]) if balance_index is not None and len(row) > balance_index else 0
         
         if row_date < period.start_date:
-            last_saldo_before = row_saldo
+            if last_before_date is None or row_date >= last_before_date:
+                last_saldo_before = row_saldo
+                last_before_date = row_date
         elif period.start_date <= row_date <= period.end_date:
             total_pemasukan += row_pemasukan
             total_pengeluaran += row_pengeluaran
-            last_saldo = row_saldo
             found_in_period = True
+            if last_period_date is None or row_date >= last_period_date:
+                last_saldo = row_saldo
+                last_period_date = row_date
             
     if not found_in_period:
         last_saldo = last_saldo_before
@@ -163,14 +218,18 @@ def ensure_sorted(sheet_name: str, period: Period) -> bool:
     if not values:
         return False
         
-    block_indices = [] # 1-based indices
+    columns = _resolved_columns(sheet_name, values)
+    block_indices = [] # 1-based physical row indices
     block_rows = []
     
     for idx, row in enumerate(values):
+        if idx <= columns["header"]:
+            continue
         if is_subtotal_row(row):
             continue
-            
-        row_date = sheet_repo._parse_sheet_date(row[0] if len(row) > 0 else "")
+
+        date_index = columns["date"] if columns["date"] is not None else 0
+        row_date = parse_date(row[date_index] if len(row) > date_index else "")
         if row_date and period.start_date <= row_date <= period.end_date:
             block_indices.append(idx + 1)
             block_rows.append(row)
@@ -178,13 +237,10 @@ def ensure_sorted(sheet_name: str, period: Period) -> bool:
     if not block_rows:
         return False
         
-    # Find TxID column
-    header_row_idx = sheet_repo._detect_header_row_index(sheet_name, values)
-    header = values[header_row_idx] if header_row_idx < len(values) else []
-    tx_id_idx = next((i for i, h in enumerate(header) if str(h).strip().upper() == "TRANSACTION ID"), None)
-    
     def sort_key(row):
-        d = sheet_repo._parse_sheet_date(row[0] if len(row) > 0 else "")
+        date_index = columns["date"] if columns["date"] is not None else 0
+        d = parse_date(row[date_index] if len(row) > date_index else "")
+        tx_id_idx = columns["tx_id"]
         t = str(row[tx_id_idx]).strip() if tx_id_idx is not None and tx_id_idx < len(row) else ""
         return (d or date(9999, 12, 31), t)
 
@@ -240,54 +296,92 @@ def write_period_total(sheet_name: str, period: Period) -> PeriodTotal:
     """
     with _PERIOD_LOCK:
         ensure_sorted(sheet_name, period)
-        
-        # Replace existing subtotal
-        # The label starts with "SUBTOTAL MINGGU X" or "TOTAL BULAN"
-        # We use a prefix to find them.
-        label_prefix = period.label.split('(')[0].strip()
-        old_rows = sheet_repo.find_subtotal_rows(sheet_name, label_prefix)
-        # Filter only for the exact period if needed, but the prompt says replace by prefix
-        # To be safe, let's check if the label matches more closely
-        to_delete = []
         worksheet = sheet_repo.get_sheet(sheet_name, create=False)
-        if worksheet:
-            values = worksheet.get_all_values()
-            for idx in old_rows:
-                if idx <= len(values):
-                    row = values[idx-1]
-                    if len(row) > 2 and period.label in str(row[2]):
-                        to_delete.append(idx)
-        
+        values = worksheet.get_all_values() if worksheet else []
+        columns = _resolved_columns(sheet_name, values)
+        description_index = columns["description"]
+        old_rows = []
+        for index, row in enumerate(values):
+            if index <= columns["header"] or description_index is None:
+                continue
+            label = _subtotal_label(row, description_index)
+            if label == period.label:
+                old_rows.append(index + 1)
+
+        to_delete = old_rows
         if to_delete:
             sheet_repo.delete_rows_bottom_up(sheet_name, to_delete)
-            
+
         total = compute_period_total(sheet_name, period)
-        
-        # Determine insert position
         values = worksheet.get_all_values() if worksheet else []
-        last_row_idx = 0
-        
-        # Find header to know where data starts
-        header_row_idx = sheet_repo._detect_header_row_index(sheet_name, values)
-        last_row_idx = header_row_idx + 1 # Start after header
-        
-        for idx, row in enumerate(values):
-            if is_subtotal_row(row):
+        columns = _resolved_columns(sheet_name, values)
+        date_index = columns["date"] if columns["date"] is not None else 0
+        last_transaction_row = None
+        last_prior_row = None
+        for index, row in enumerate(values):
+            if index <= columns["header"] or is_subtotal_row(row):
                 continue
-            row_date = sheet_repo._parse_sheet_date(row[0] if len(row) > 0 else "")
-            if row_date:
-                if row_date <= period.end_date:
-                    last_row_idx = idx + 1
-        
-        # Build row
-        # [Tanggal, Produk, Keterangan, Kuantitas, Satuan, Pemasukan, Pengeluaran, Saldo, TxID]
-        new_row = [
-            period.end_date.strftime("%Y-%m-%d"), "", period.label,
-            "", "", total.pemasukan, total.pengeluaran, total.sisa_saldo_akhir, ""
-        ]
-        
-        sheet_repo.insert_rows_after(sheet_name, last_row_idx, [new_row])
+            row_date = parse_date(row[date_index] if len(row) > date_index else "")
+            if row_date and period.start_date <= row_date <= period.end_date:
+                last_transaction_row = index + 1
+            elif row_date and row_date < period.start_date:
+                last_prior_row = index + 1
+
+        header_row = columns["header"] + 1
+        insert_after = last_transaction_row or last_prior_row or header_row
+        new_row = _build_total_row(sheet_name, period, total)
+        sheet_repo.insert_rows_after(sheet_name, insert_after, [new_row])
         return total
+
+def _build_total_row(sheet_name: str, period: Period, total: PeriodTotal) -> list:
+    if sheet_name == "(2)Rincian Transaksi Harian":
+        return [
+            period.end_date.strftime("%Y-%m-%d"), "", period.label,
+            "", "", total.pemasukan, total.pengeluaran, "",
+        ]
+    return [
+        period.end_date.strftime("%Y-%m-%d"), "", period.label,
+        "", "", total.pemasukan, total.pengeluaran, total.sisa_saldo_akhir, "",
+    ]
+
+def sort_all_transactions(sheet_name: str) -> bool:
+    """Sort dated transaction rows globally while preserving their physical slots."""
+    worksheet = sheet_repo.get_sheet(sheet_name, create=False)
+    if not worksheet:
+        return False
+    values = worksheet.get_all_values()
+    if not values:
+        return False
+
+    columns = _resolved_columns(sheet_name, values)
+    date_index = columns["date"] if columns["date"] is not None else 0
+    transaction_slots = []
+    transaction_rows = []
+    for index, row in enumerate(values):
+        if index <= columns["header"] or is_subtotal_row(row):
+            continue
+        row_date = parse_date(row[date_index] if len(row) > date_index else "")
+        if row_date:
+            transaction_slots.append(index + 1)
+            transaction_rows.append(row)
+
+    tx_id_index = columns["tx_id"]
+    sorted_rows = sorted(
+        transaction_rows,
+        key=lambda row: (
+            parse_date(row[date_index]) or date(9999, 12, 31),
+            str(row[tx_id_index]).strip() if tx_id_index is not None and len(row) > tx_id_index else "",
+        ),
+    )
+    if sorted_rows == transaction_rows:
+        return False
+
+    start_row, end_row = transaction_slots[0], transaction_slots[-1]
+    replacement = [list(row) for row in values[start_row - 1:end_row]]
+    for slot, row in zip(transaction_slots, sorted_rows):
+        replacement[slot - start_row] = row
+    sheet_repo.rewrite_period_block(sheet_name, start_row, end_row, replacement)
+    return True
 
 def write_monthly_total(sheet_name: str, year: int, month: int) -> PeriodTotal:
     """
@@ -304,57 +398,43 @@ def write_monthly_total(sheet_name: str, year: int, month: int) -> PeriodTotal:
         monthly_period = next(p for p in boundaries if p.kind == "month")
         week4_period = boundaries[3]
         ensure_sorted(sheet_name, monthly_period)
-        
-        # Remove old monthly total
-        label_prefix = f"TOTAL BULAN"
-        old_rows = sheet_repo.find_subtotal_rows(sheet_name, label_prefix)
-        to_delete = []
         worksheet = sheet_repo.get_sheet(sheet_name, create=False)
-        if worksheet:
-            values = worksheet.get_all_values()
-            for idx in old_rows:
-                if idx <= len(values):
-                    row = values[idx-1]
-                    if len(row) > 2 and monthly_period.label in str(row[2]):
-                        to_delete.append(idx)
+        values = worksheet.get_all_values() if worksheet else []
+        columns = _resolved_columns(sheet_name, values)
+        description_index = columns["description"]
+        to_delete = [
+            index + 1 for index, row in enumerate(values)
+            if index > columns["header"] and description_index is not None
+            and _subtotal_label(row, description_index) == monthly_period.label
+        ]
         if to_delete:
             sheet_repo.delete_rows_bottom_up(sheet_name, to_delete)
-            
+
         total = compute_period_total(sheet_name, monthly_period)
-        
-        # Find insert position: after Week 4 subtotal or after last transaction
         values = worksheet.get_all_values() if worksheet else []
-        insert_after = 0
-        
-        # Place the running monthly total after the latest weekly subtotal.
-        week4_label = week4_period.label
+        columns = _resolved_columns(sheet_name, values)
+        date_index = columns["date"] if columns["date"] is not None else 0
+        description_index = columns["description"]
         month_year_label = monthly_period.label.removeprefix("TOTAL BULAN ")
-        for idx, row in enumerate(values):
-            row_label = str(row[2]).strip() if len(row) > 2 else ""
-            if row_label.startswith("SUBTOTAL MINGGU") and month_year_label in row_label:
-                insert_after = idx + 1
-        if insert_after == 0:
-            for idx, row in enumerate(values):
-                if len(row) > 2 and week4_label in str(row[2]):
-                    insert_after = idx + 1
-                    break
-        
-        if insert_after == 0:
-            # Fallback to last transaction in month
-            header_row_idx = sheet_repo._detect_header_row_index(sheet_name, values)
-            insert_after = header_row_idx + 1
-            for idx, row in enumerate(values):
-                if is_subtotal_row(row):
-                    continue
-                row_date = sheet_repo._parse_sheet_date(row[0] if len(row) > 0 else "")
-                if row_date and row_date <= monthly_period.end_date:
-                    insert_after = idx + 1
-                    
-        new_row = [
-            monthly_period.end_date.strftime("%Y-%m-%d"), "", monthly_period.label,
-            "", "", total.pemasukan, total.pengeluaran, total.sisa_saldo_akhir, ""
-        ]
-        
+        week4_row = None
+        latest_weekly_row = None
+        last_transaction_row = None
+        for index, row in enumerate(values):
+            if index <= columns["header"]:
+                continue
+            label = _subtotal_label(row, description_index)
+            if label == week4_period.label:
+                week4_row = index + 1
+            if label.startswith("SUBTOTAL MINGGU") and month_year_label in label:
+                latest_weekly_row = index + 1
+            if is_subtotal_row(row):
+                continue
+            row_date = parse_date(row[date_index] if len(row) > date_index else "")
+            if row_date and monthly_period.start_date <= row_date <= monthly_period.end_date:
+                last_transaction_row = index + 1
+
+        insert_after = week4_row or latest_weekly_row or last_transaction_row or columns["header"] + 1
+        new_row = _build_total_row(sheet_name, monthly_period, total)
         sheet_repo.insert_rows_after(sheet_name, insert_after, [new_row])
         return total
 
@@ -373,7 +453,7 @@ def process_all_units_period(year: int, month: int,
             raise ValueError("week_index is required for week period")
         target_period = boundaries[week_index - 1]
         
-    for unit in config.UNIT_USAHA:
+    for unit in [*config.UNIT_USAHA, "(2)Rincian Transaksi Harian"]:
         try:
             if period_kind == "month":
                 res = write_monthly_total(unit, year, month)

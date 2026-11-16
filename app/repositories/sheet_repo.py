@@ -10,7 +10,7 @@ from gspread.utils import numericise
 from time import monotonic, sleep
 
 from app.config import config
-from app.core.utils import parse_amount
+from app.core.utils import parse_amount, parse_date
 from app.core.retry import retry_google_api, safe_append_with_idempotency
 from app.core.transaction_id import generate_transaction_id
 from app.core.metrics import track_sheets
@@ -257,6 +257,24 @@ def _ensure_transaction_id_header(worksheet) -> bool:
     header = [str(cell).strip() for cell in values[header_row_index]]
     normalized = [_normalize_header_label(cell) for cell in header]
 
+    if (
+        header_row_index > 0
+        and normalized
+        and normalized[0] == "tanggal"
+        and "sisa saldo" in normalized
+        and "transaction id" in normalized
+        and len(header) >= 9
+        and (normalized.index("sisa saldo"), normalized.index("transaction id")) != (7, 8)
+    ):
+        header[7:9] = ["Sisa Saldo", "Transaction ID"]
+        _retry_google_call(
+            worksheet.update,
+            range_name=f"A{header_row_number}:I{header_row_number}",
+            values=[header[:9]],
+        )
+        invalidate_cache(getattr(worksheet, "title", ""))
+        return True
+
     if "transaction id" in normalized:
         return False
 
@@ -289,17 +307,7 @@ def _ensure_transaction_id_header(worksheet) -> bool:
 
 
 def _parse_sheet_date(value):
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    text = str(value or "").strip()
-    for pattern in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y.%m.%d", "%d %b %Y", "%d %B %Y"):
-        try:
-            return datetime.strptime(text, pattern).date()
-        except ValueError:
-            continue
-    return None
+    return parse_date(value)
 
 
 def _sort_rows_by_date(rows, date_column_index):
@@ -483,10 +491,13 @@ def _appended_cell_format(sheet_name: str, column: int) -> dict:
             cell_format["numberFormat"] = {"type": "CURRENCY", "pattern": '"Rp" #,##0'}
             cell_format["horizontalAlignment"] = "RIGHT"
     elif sheet_name.startswith(("(3)", "(4)", "(5)", "(6)", "(7)")):
-        if column == 1:
+        if column == 0:
             cell_format["numberFormat"] = {"type": "DATE", "pattern": "dd mmm yyyy"}
             cell_format["horizontalAlignment"] = "CENTER"
-        elif column in {5, 6, 7, 8}:
+        elif column == 4:
+            cell_format["numberFormat"] = {"type": "NUMBER", "pattern": "#,##0"}
+            cell_format["horizontalAlignment"] = "RIGHT"
+        elif column in {5, 6, 7}:
             cell_format["numberFormat"] = {"type": "CURRENCY", "pattern": '"Rp" #,##0'}
             cell_format["horizontalAlignment"] = "RIGHT"
     return cell_format
@@ -509,6 +520,8 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
             if sheet_name == "(2)Rincian Transaksi Harian"
             else None
         )
+        is_unit_ledger = sheet_name in config.UNIT_USAHA
+        unit_ledger_row_count = len(worksheet.get_all_values()) if is_unit_ledger else None
         request_rows = []
         date_columns = set()
         for values in rows:
@@ -588,6 +601,29 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
                     }
                 },
             ])
+
+        if unit_ledger_row_count is not None and rows:
+            appended_end_row = unit_ledger_row_count + len(rows)
+            requests.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": worksheet.id,
+                        "startRowIndex": unit_ledger_row_count,
+                        "endRowIndex": appended_end_row,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": 9,
+                    },
+                    "cell": {"userEnteredFormat": {
+                        "verticalAlignment": "MIDDLE",
+                        "wrapStrategy": "WRAP",
+                        "borders": {"bottom": {
+                            "style": "SOLID",
+                            "color": {"red": 0.86, "green": 0.89, "blue": 0.92},
+                        }},
+                    }},
+                    "fields": "userEnteredFormat.verticalAlignment,userEnteredFormat.wrapStrategy,userEnteredFormat.borders.bottom",
+                }
+            })
 
     _safe_append(
         lambda: spreadsheet.batch_update({"requests": requests}),
@@ -1421,11 +1457,50 @@ def find_subtotal_rows(sheet_name: str, label_prefix: str) -> list[int]:
 
 @retry_google_api()
 def insert_rows_after(sheet_name: str, after_row: int, rows: list[list]) -> None:
-    """Wrapper worksheet.insert_rows(rows, row=after_row+1)."""
+    """Insert after a physical 1-based worksheet row; blank rows are not renumbered."""
     worksheet = get_sheet(sheet_name)
     if not worksheet:
         raise ValueError(f"Worksheet not found: {sheet_name}")
+    if after_row < 0:
+        raise ValueError("after_row must be a non-negative physical row index")
+    if not rows:
+        return
     worksheet.insert_rows(rows, row=after_row + 1)
+    total_formats = []
+    for offset, values in enumerate(rows):
+        label = next((
+            str(value).strip().upper()
+            for value in values
+            if str(value).strip().upper().startswith(("SUBTOTAL MINGGU", "TOTAL BULAN"))
+        ), "")
+        if not label:
+            continue
+        is_month_total = label.startswith("TOTAL BULAN")
+        total_formats.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": after_row + offset,
+                    "endRowIndex": after_row + offset + 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": max(len(values), 1),
+                },
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": (
+                        {"red": 0.82, "green": 0.91, "blue": 0.84}
+                        if is_month_total
+                        else {"red": 1.0, "green": 0.94, "blue": 0.72}
+                    ),
+                    "textFormat": {"bold": True},
+                }},
+                "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold",
+            }
+        })
+    if total_formats:
+        _retry_google_call(
+            worksheet.spreadsheet.batch_update,
+            {"requests": total_formats},
+        )
     invalidate_cache(sheet_name)
 
 

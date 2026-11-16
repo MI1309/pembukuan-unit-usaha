@@ -181,6 +181,37 @@ class SheetStructureTests(unittest.TestCase):
         self.assertEqual(worksheet.update.call_args_list[0].kwargs.get("range_name"), "A1:D1")
         self.assertEqual(worksheet.update.call_args_list[1].kwargs.get("range_name"), "A2:D3")
 
+    def test_daily_detail_append_copies_template_format_and_sorts_by_date(self):
+        sheet_name = "(2)Rincian Transaksi Harian"
+        worksheet = unittest.mock.Mock(id=17)
+        worksheet.get_all_values.return_value = [
+            ["Title"], ["Subtitle"], ["Period"], [], ["Tanggal", "Produk"],
+            ["2026-11-16", "Item existing"],
+        ]
+        spreadsheet = unittest.mock.Mock()
+        new_rows = [
+            ["2026-11-01", "Item earlier", "", "", "", 100, "", "tx-b"],
+            ["2026-11-16", "Item later", "", "", "", 200, "", "tx-a"],
+        ]
+
+        with patch.object(sheet_repo, "get_spreadsheet", return_value=spreadsheet), \
+             patch.object(sheet_repo, "get_sheet", return_value=worksheet), \
+             patch.object(sheet_repo, "_ensure_transaction_id_header"), \
+               patch.object(sheet_repo, "_safe_append", side_effect=lambda operation, *_args: operation()), \
+             patch.object(sheet_repo, "invalidate_cache"):
+            sheet_repo.append_rows_atomically([(sheet_name, row) for row in new_rows])
+
+        requests = spreadsheet.batch_update.call_args.args[0]["requests"]
+        copy_request = next(request["copyPaste"] for request in requests if "copyPaste" in request)
+        sort_request = next(request["sortRange"] for request in requests if "sortRange" in request)
+        self.assertEqual(copy_request["pasteType"], "PASTE_FORMAT")
+        self.assertEqual(copy_request["source"]["startRowIndex"], 5)
+        self.assertEqual(copy_request["destination"]["startRowIndex"], 6)
+        self.assertEqual(sort_request["range"]["startRowIndex"], 5)
+        self.assertEqual(sort_request["range"]["endRowIndex"], 8)
+        self.assertEqual(sort_request["sortSpecs"][0]["dimensionIndex"], 0)
+        self.assertEqual(sort_request["sortSpecs"][1]["dimensionIndex"], 7)
+
 
 if __name__ == "__main__":
     unittest.main()

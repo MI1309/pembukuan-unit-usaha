@@ -504,6 +504,11 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
         if not worksheet:
             raise ValueError(f"Worksheet not found: {sheet_name}")
         _ensure_transaction_id_header(worksheet)
+        daily_detail_row_count = (
+            len(worksheet.get_all_values())
+            if sheet_name == "(2)Rincian Transaksi Harian"
+            else None
+        )
         request_rows = []
         date_columns = set()
         for values in rows:
@@ -545,6 +550,45 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
                 }
             })
 
+        if daily_detail_row_count is not None and rows:
+            appended_end_row = daily_detail_row_count + len(rows)
+            requests.extend([
+                {
+                    "copyPaste": {
+                        "source": {
+                            "sheetId": worksheet.id,
+                            "startRowIndex": 5,
+                            "endRowIndex": 6,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 8,
+                        },
+                        "destination": {
+                            "sheetId": worksheet.id,
+                            "startRowIndex": daily_detail_row_count,
+                            "endRowIndex": appended_end_row,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 8,
+                        },
+                        "pasteType": "PASTE_FORMAT",
+                    }
+                },
+                {
+                    "sortRange": {
+                        "range": {
+                            "sheetId": worksheet.id,
+                            "startRowIndex": 5,
+                            "endRowIndex": appended_end_row,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 8,
+                        },
+                        "sortSpecs": [
+                            {"dimensionIndex": 0, "sortOrder": "ASCENDING"},
+                            {"dimensionIndex": 7, "sortOrder": "ASCENDING"},
+                        ],
+                    }
+                },
+            ])
+
     _safe_append(
         lambda: spreadsheet.batch_update({"requests": requests}),
         [values for rows in rows_by_name.values() for values in rows],
@@ -552,7 +596,7 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
         "append_rows_atomically",
     )
 
-    # OPT #5 — sorting TIDAK di sini. Panggil sort_sheet_rows() periodik.
+    # Daily detail is kept chronological; unit ledgers are sorted by recap.
     for sheet_name in rows_by_name:
         invalidate_cache(sheet_name)
 

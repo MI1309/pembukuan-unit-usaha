@@ -1483,8 +1483,8 @@ def insert_rows_after(sheet_name: str, after_row: int, rows: list[list]) -> None
                     "sheetId": worksheet.id,
                     "startRowIndex": after_row + offset,
                     "endRowIndex": after_row + offset + 1,
-                    "startColumnIndex": 4 if is_daily_detail else 0,
-                    "endColumnIndex": 7 if is_daily_detail else max(len(values), 1),
+                    "startColumnIndex": 0,
+                    "endColumnIndex": max(len(values), 1),
                 },
                 "cell": {"userEnteredFormat": {
                     "backgroundColor": (
@@ -1493,8 +1493,36 @@ def insert_rows_after(sheet_name: str, after_row: int, rows: list[list]) -> None
                         else {"red": 1.0, "green": 0.94, "blue": 0.72}
                     ),
                     "textFormat": {"bold": True},
+                    "wrapStrategy": "CLIP",
                 }},
-                "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold",
+                "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold,userEnteredFormat.wrapStrategy",
+            }
+        })
+        label_column = 2
+        total_formats.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": after_row + offset,
+                    "endRowIndex": after_row + offset + 1,
+                    "startColumnIndex": label_column,
+                    "endColumnIndex": label_column + 1,
+                },
+                "cell": {"userEnteredFormat": {"horizontalAlignment": "LEFT"}},
+                "fields": "userEnteredFormat.horizontalAlignment",
+            }
+        })
+        total_formats.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": after_row + offset,
+                    "endRowIndex": after_row + offset + 1,
+                    "startColumnIndex": 5,
+                    "endColumnIndex": 7,
+                },
+                "cell": {"userEnteredFormat": {"horizontalAlignment": "RIGHT"}},
+                "fields": "userEnteredFormat.horizontalAlignment",
             }
         })
     if total_formats:

@@ -8,7 +8,8 @@ from app.services.periodic_total_service import Period, PeriodTotal
 def test_monthly_total_rows_only_selects_requested_month():
     values = [
         ["Tanggal", "Produk", "Keterangan Transaksi", "Qty", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Sisa Saldo", "Transaction ID"],
-        ["2026-10-31", "", "", "SUBTOTAL MINGGU 4 (22-31 Oktober 2026)", "", "0", "0", "0", ""],
+        ["2026-10-31", "", "SUBTOTAL MINGGU 4 (22-31 Oktober 2026)", "", "", "0", "0", "0", ""],
+        ["2026-10-25", "SUBTOTAL MINGGU 3 Oktober 2026", "", "", "", "0", "0", "0", ""],
         ["2026-11-30", "", "TOTAL BULAN November 2026", "", "", "0", "0", "0", ""],
     ]
 
@@ -39,12 +40,13 @@ def test_migration_dry_run_does_not_mutate_sheet(mock_get_sheet, mock_compute):
 @patch("app.services.periodic_total_service.write_monthly_total")
 @patch("app.services.periodic_total_service.write_period_total")
 @patch("app.services.periodic_total_service.sort_all_transactions")
+@patch("app.services.periodic_total_service.normalize_row_formatting")
 @patch("app.repositories.sheet_repo.delete_rows_bottom_up")
 @patch("app.services.periodic_total_service.compute_period_total")
 @patch("app.repositories.sheet_repo.get_sheet")
 def test_migration_apply_rebuilds_selected_month_only(
-    mock_get_sheet, mock_compute, mock_delete, mock_sort,
-    mock_write_week, mock_write_month,
+    mock_get_sheet, mock_compute, mock_delete, mock_normalize,
+    mock_sort, mock_write_week, mock_write_month,
 ):
     from app.config import config
 
@@ -64,3 +66,4 @@ def test_migration_apply_rebuilds_selected_month_only(
     mock_sort.assert_called_once_with(config.UNIT_USAHA[0])
     assert mock_write_week.call_count == 4
     mock_write_month.assert_called_once_with(config.UNIT_USAHA[0], 2026, 11)
+    assert mock_normalize.call_count == 2

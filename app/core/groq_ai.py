@@ -108,14 +108,20 @@ def _local_parse_regex(message: str) -> dict | None:
         
         if match:
             product, qty, unit, price, biz_unit = match.groups()
+            product = product.strip()
+            description_match = re.search(r"\b(jual\s+ke\b.*)$", product, re.I)
+            description = ""
+            if description_match:
+                description = description_match.group(1).strip()
+                product = product[:description_match.start()].strip()
             
             # Basic validation
             nominal = parse_amount(price)
             if nominal <= 0: continue
             
             transactions.append({
-                "produk": product.strip(),
-                "keterangan": f"Auto-parsed: {line}",
+                "produk": product,
+                "keterangan": description,
                 "kuantitas": qty.replace(".", "").replace(",", "."),
                 "satuan": unit.upper(),
                 "total_harga": None,

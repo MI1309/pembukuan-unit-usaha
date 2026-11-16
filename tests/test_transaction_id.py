@@ -117,6 +117,10 @@ class TransactionIdTests(unittest.TestCase):
         self.assertTrue(first[0])
         self.assertFalse(second[0])
         self.assertIn(tx_id, second[1])
+        self.assertEqual(second[2]["duplicates"][0]["transaction_id"], tx_id)
+        copy_message = sales_service.duplicate_copy_message(second[2]["duplicates"][0])
+        self.assertIn("sudah tercatat", copy_message)
+        self.assertIn(tx_id, copy_message)
         append.assert_called_once()
         self.assertEqual(append.call_args.args[0][0][1][-1], tx_id)
         log_event.assert_called_once_with(
@@ -149,6 +153,36 @@ class TransactionIdTests(unittest.TestCase):
         self.assertEqual(first["status"], "saved")
         self.assertEqual(second["status"], "duplicate")
         sales_call.assert_called_once()
+
+    def test_webhook_sends_forwardable_message_for_duplicate_transaction(self):
+        duplicate_sale = {**self.sale, "transaction_id": "20261115-TAF-0123abcd"}
+        send_message = Mock(return_value=True)
+        with patch.object(config, "WEBHOOK_SECRET", "test-secret"), \
+             patch.object(webhook.threading, "Thread"), \
+             patch.object(webhook.webhook_state, "is_duplicate_event", return_value=False), \
+             patch.object(webhook.karyawan_service, "normalize_phone", return_value="628123"), \
+             patch.object(webhook.karyawan_service, "is_admin", return_value=True), \
+             patch.object(webhook.karyawan_service, "is_help_command", return_value=False), \
+             patch.object(webhook.webhook_state, "is_rate_limited", return_value=False), \
+             patch.object(webhook.karyawan_service, "handle_karyawan", return_value=None), \
+             patch.object(webhook.payroll_service, "handle_payroll_command", return_value=None), \
+             patch.object(webhook.sales_service, "handle_help_command", return_value=None), \
+             patch.object(webhook.sales_service, "process_rekap", return_value=None), \
+             patch.object(webhook.webhook_state, "get_pending_confirmation", return_value=None), \
+             patch.object(webhook.sales_service, "process_sales", return_value=(
+                 False, "Transaksi sudah tercatat sebelumnya.", {"duplicates": [duplicate_sale]}
+             )), \
+             patch.object(webhook.webhook_state, "log_event"), \
+             patch.object(webhook, "send_whatsapp", send_message):
+            result = webhook.process_webhook_payload({
+                "secret": "test-secret", "sender": "628123", "message": "catat transaksi",
+            })
+
+        self.assertEqual(result["status"], "duplicate")
+        sent_messages = [call.args[1] for call in send_message.call_args_list]
+        self.assertIn("Transaksi sudah tercatat sebelumnya.", sent_messages)
+        self.assertIn("📋 *PESAN SIAP DITERUSKAN*", sent_messages)
+        self.assertTrue(any("20261115-TAF-0123abcd" in text for text in sent_messages))
 
     def test_migration_dry_run_does_not_write_and_apply_appends_id_header(self):
         worksheet = Mock()

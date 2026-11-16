@@ -213,6 +213,21 @@ def _confirm_text(sale: dict) -> str:
     )
 
 
+def duplicate_copy_message(sale: dict) -> str:
+    amount_label = "Pemasukan" if sale.get("is_penjualan", True) else "Pengeluaran"
+    quantity = f"{sale['kuantitas']:g} {sale['unit_kuantitas']}".strip()
+    return (
+        "ℹ️ INFORMASI TRANSAKSI\n"
+        f"Tanggal: {format_tanggal_id(datetime.combine(sale['tanggal'], datetime.min.time()))}\n"
+        f"Produk: {sale['produk']}\n"
+        f"Jumlah: {quantity or '-'}\n"
+        f"Unit: {sale['unit']}\n"
+        f"{amount_label}: {format_rupiah(sale['penjualan'])}\n"
+        f"ID transaksi: {sale['transaction_id']}\n"
+        "Status: transaksi ini sudah tercatat, tidak perlu dicatat ulang."
+    )
+
+
 def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tuple[bool, str, dict | None]:
     parsed = analyze_sales(message)
     raw_items = parsed.get("transaksi", []) if isinstance(parsed, dict) else []
@@ -237,6 +252,7 @@ def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tu
         return True, _confirm_text(large_sales[0]), {"pending": True}
 
     saved = []
+    duplicates = []
     with _SALES_LOCK:
         try:
             tx_ids = [sale["transaction_id"] for sale in prepared]
@@ -251,7 +267,10 @@ def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tu
             prepared = [sale for sale in prepared if not existing.get(sale["transaction_id"])]
             if not prepared:
                 duplicate_id = duplicates[0]["transaction_id"]
-                return False, f"Transaksi sudah tercatat sebelumnya (ID: {duplicate_id})", None
+                return False, (
+                    f"⚠️ Transaksi sudah tercatat sebelumnya (ID: {duplicate_id}). "
+                    "Saya sertakan pesan yang bisa diteruskan."
+                ), {"duplicates": duplicates}
             _maybe_archive_unit_transactions(prepared[0]["tanggal"])
             _maybe_archive_daily_detail(prepared[0]["tanggal"])
             rows = [row for sale in prepared for row in _save_sale(sale)]
@@ -285,7 +304,7 @@ def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tu
         lines.extend(f"• {error}" for error in failed[:10])
         if len(failed) > 10:
             lines.append(f"... dan {len(failed) - 10} baris gagal lainnya")
-    return True, "\n".join(lines), {"saved": len(saved)}
+    return True, "\n".join(lines), {"saved": len(saved), "duplicates": duplicates}
 
 
 def _parse_date(value) -> date | None:

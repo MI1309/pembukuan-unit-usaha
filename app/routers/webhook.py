@@ -26,6 +26,17 @@ def _send_help_reply(sender: str, guide: str, copy_messages: list[str]) -> bool:
             return False
     return True
 
+
+def _send_duplicate_reply(sender: str, notice: str, duplicates: list[dict]) -> bool:
+    if not send_whatsapp(sender, notice):
+        return False
+    if not send_whatsapp(sender, "📋 *PESAN SIAP DITERUSKAN*"):
+        return False
+    for sale in duplicates:
+        if not send_whatsapp(sender, sales_service.duplicate_copy_message(sale)):
+            return False
+    return True
+
 # setup
 @router.get("/setup")
 def setup_database():
@@ -211,9 +222,20 @@ def process_webhook_payload(data: dict) -> dict:
         pending_message = webhook_state.get_pending_confirmation(sender)
         if pending_message and re.fullmatch(r"ya", message, re.I):
             webhook_state.clear_pending_confirmation(sender)
-            is_sale, reply, _ = sales_service.process_sales(pending_message, confirmed=True, sender=sender)
+            is_sale, reply, state = sales_service.process_sales(pending_message, confirmed=True, sender=sender)
+            duplicates = (state or {}).get("duplicates", [])
+            if duplicates and not is_sale:
+                _send_duplicate_reply(sender, reply, duplicates)
+                webhook_state.log_event(sender, "YA (konfirmasi)", "DUPLICATE_SKIPPED")
+                return {"status": "duplicate"}
             if is_sale:
                 send_whatsapp(sender, reply)
+                if duplicates:
+                    _send_duplicate_reply(
+                        sender,
+                        f"⚠️ {len(duplicates)} transaksi duplikat tidak dicatat ulang.",
+                        duplicates,
+                    )
             webhook_state.log_event(sender, "YA (konfirmasi)", "CONFIRMED")
             return {"status": "confirmed"}
         if pending_message and re.fullmatch(r"(batal|tidak|no)", message, re.I):
@@ -223,7 +245,12 @@ def process_webhook_payload(data: dict) -> dict:
             return {"status": "cancelled"}
 
         is_sale, reply, state = sales_service.process_sales(message, sender=sender)
+        duplicates = (state or {}).get("duplicates", [])
         if not is_sale:
+            if duplicates:
+                _send_duplicate_reply(sender, reply, duplicates)
+                webhook_state.log_event(sender, message, "DUPLICATE_SKIPPED")
+                return {"status": "duplicate"}
             webhook_state.log_event(sender, message, "IGNORED", error="bukan_pesan_penjualan")
             return {"status": "ignored"}
         if state and state.get("pending"):
@@ -232,6 +259,12 @@ def process_webhook_payload(data: dict) -> dict:
             webhook_state.log_event(sender, message, "PENDING_CONFIRM")
             return {"status": "pending_confirm"}
         send_whatsapp(sender, reply)
+        if duplicates:
+            _send_duplicate_reply(
+                sender,
+                f"⚠️ {len(duplicates)} transaksi duplikat tidak dicatat ulang.",
+                duplicates,
+            )
         invoices = ",".join((state or {}).get("invoices", []))
         webhook_state.log_event(sender, message, "SAVED", invoice=invoices)
         return {"status": "saved"}

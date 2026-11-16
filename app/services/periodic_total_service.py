@@ -132,7 +132,7 @@ def _resolved_columns(sheet_name: str, values: list[list]) -> dict[str, int | No
     if columns["description"] is None:
         columns["description"] = 2
     if columns["tx_id"] is None:
-        columns["tx_id"] = 8 if not columns["daily"] else 7
+        columns["tx_id"] = 7 if columns["daily"] else 8
     return columns
 
 def _parse_ledger_date(value):
@@ -300,7 +300,7 @@ def ensure_sorted(sheet_name: str, period: Period) -> bool:
         
     return True
 
-def write_period_total(sheet_name: str, period: Period) -> PeriodTotal:
+def write_period_total(sheet_name: str, period: Period, force: bool = False) -> PeriodTotal:
     """
         Replace the matching subtotal and write it after the maximum-date
         transaction only when that date reaches the period end.
@@ -326,7 +326,7 @@ def write_period_total(sheet_name: str, period: Period) -> PeriodTotal:
         total = compute_period_total(sheet_name, period)
         values = worksheet.get_all_values() if worksheet else []
         latest_date, insert_after = _latest_transaction_position(sheet_name, values, period)
-        if latest_date is None or latest_date < period.end_date:
+        if latest_date is None or (not force and latest_date < period.end_date):
             return total
 
         new_row = _build_total_row(sheet_name, period, total)
@@ -336,12 +336,13 @@ def write_period_total(sheet_name: str, period: Period) -> PeriodTotal:
 def _build_total_row(sheet_name: str, period: Period, total: PeriodTotal) -> list:
     if sheet_name == "(2)Rincian Transaksi Harian":
         return [
-            "", "", period.label, "", "",
+            "", "", "", "", period.label,
             total.pemasukan, total.pengeluaran, "",
         ]
     return [
         period.end_date.strftime("%Y-%m-%d"), "", period.label,
-        "", "", total.pemasukan, total.pengeluaran, total.sisa_saldo_akhir, "",
+        "", "", total.pemasukan, total.pengeluaran,
+        total.pemasukan - total.pengeluaran, "",
     ]
 
 def _latest_transaction_position(sheet_name: str, values: list[list], period: Period):
@@ -399,8 +400,8 @@ def sort_all_transactions(sheet_name: str) -> bool:
     sheet_repo.rewrite_period_block(sheet_name, start_row, end_row, replacement)
     return True
 
-def normalize_row_formatting(sheet_name: str) -> int:
-    """Rewrite the sheet body to the detected header width and normalize dates."""
+def normalize_sheet_rows(sheet_name: str) -> int:
+    """Place transaction fields in the canonical columns and trim overflow cells."""
     worksheet = sheet_repo.get_sheet(sheet_name, create=False)
     if not worksheet:
         return 0
@@ -412,43 +413,97 @@ def normalize_row_formatting(sheet_name: str) -> int:
     header_index = columns["header"]
     if header_index < 0 or header_index >= len(values):
         return 0
-    width = len(values[header_index])
+    header = values[header_index]
+    width = len(header)
     if width == 0 or header_index + 1 >= len(values):
         return 0
 
-    date_index = columns["date"] if columns["date"] is not None else 0
-    tx_id_index = columns["tx_id"]
+    normalized_header = [sheet_repo._normalize_header_label(cell) for cell in header]
+
+    def find_source(*labels, fallback=None):
+        return next(
+            (index for index, value in enumerate(normalized_header) if value in labels),
+            fallback,
+        )
+
+    source_indices = {
+        "date": columns["date"] if columns["date"] is not None else 0,
+        "name": find_source("nama barang/jasa /produk", "nama produk /jasa/ barang", "nama produk", "nama barang", "produk", "barang", fallback=1),
+        "description": columns["description"] if columns["description"] is not None else 2,
+        "quantity": find_source("kuantitas", "qty", fallback=3),
+        "unit": find_source("satuan", "satuan (rp)", fallback=4),
+        "income": columns["income"] if columns["income"] is not None else 5,
+        "expense": columns["expense"] if columns["expense"] is not None else 6,
+        "balance": columns["balance"],
+        "tx_id": columns["tx_id"],
+    }
+    daily = columns["daily"]
+    target_indices = {
+        "date": 0, "name": 1, "description": 2, "quantity": 3,
+        "unit": 4, "income": 5, "expense": 6,
+        "balance": 7, "tx_id": 8,
+    }
     normalized_rows = []
+    changed_count = 0
     for original in values[header_index + 1:]:
         row = list(original)
-        row_date = _parse_ledger_date(row[date_index] if len(row) > date_index else "")
-        if row_date:
-            row[date_index] = row_date.isoformat()
+        if is_subtotal_row(row):
+            normalized = row[:width] + [""] * max(0, width - len(row))
         else:
-            candidate_index = next((
-                index for index in range(date_index + 1, len(row))
-                if not any(str(value).strip() for value in row[date_index:index])
-                and _parse_ledger_date(row[index])
-            ), None)
-            if candidate_index is not None:
-                row = row[candidate_index:]
-                row[date_index] = _parse_ledger_date(row[date_index]).isoformat()
+            expected_date_index = source_indices["date"]
+            expected_date = _parse_ledger_date(
+                row[expected_date_index] if len(row) > expected_date_index else ""
+            )
+            detected_date_index = next((
+                index for index, value in enumerate(row)
+                if _parse_ledger_date(value) is not None
+            ), expected_date_index)
+            shift = max(0, detected_date_index - expected_date_index) if not expected_date else 0
+            if shift:
+                row = row[shift:]
+            row_date = expected_date or _parse_ledger_date(
+                row[expected_date_index] if len(row) > expected_date_index else ""
+            )
+            if row_date:
+                normalized = [""] * width
+                for field, target_index in target_indices.items():
+                    source_index = source_indices[field]
+                    if target_index is None or source_index is None:
+                        continue
+                    if source_index < len(row) and target_index < width:
+                        normalized[target_index] = row[source_index]
+                normalized[0] = row_date.isoformat()
+                if daily:
+                    normalized[7] = (
+                        parse_amount(normalized[5]) - parse_amount(normalized[6])
+                    )
+                tx_id_index = target_indices["tx_id"]
+                if tx_id_index < width and not normalized[tx_id_index]:
+                    transaction_id = next((
+                        str(value).strip() for value in row
+                        if re.fullmatch(r"\d{8}-[A-Z]{3}-[A-Fa-f0-9]{8}", str(value).strip())
+                    ), "")
+                    normalized[tx_id_index] = transaction_id
+            else:
+                normalized = row[:width] + [""] * max(0, width - len(row))
 
-        tx_id = next((
-            str(value).strip() for value in row
-            if re.fullmatch(r"\d{8}-[A-Z]{3}-[A-Fa-f0-9]{8}", str(value).strip())
-        ), None)
-        row = row[:width] + [""] * max(0, width - len(row))
-        if tx_id and tx_id_index is not None and tx_id_index < width:
-            row[tx_id_index] = tx_id
-        normalized_rows.append(row)
+        if normalized != original:
+            changed_count += 1
+        normalized_rows.append(normalized)
 
-    sheet_repo.rewrite_period_block(
-        sheet_name, header_index + 2, len(values), normalized_rows,
-    )
-    return len(normalized_rows)
+    if changed_count:
+        sheet_repo.rewrite_period_block(
+            sheet_name, header_index + 2, len(values), normalized_rows,
+        )
+    return changed_count
 
-def write_monthly_total(sheet_name: str, year: int, month: int) -> PeriodTotal:
+
+def normalize_row_formatting(sheet_name: str) -> int:
+    """Backward-compatible name for transaction row normalization."""
+    return normalize_sheet_rows(sheet_name)
+
+
+def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = False) -> PeriodTotal:
     """
     Replace the monthly total after the final transaction date, leaving one
     blank row before it and placing it after the week-4 subtotal when present.
@@ -477,16 +532,19 @@ def write_monthly_total(sheet_name: str, year: int, month: int) -> PeriodTotal:
         latest_date, latest_transaction_row = _latest_transaction_position(
             sheet_name, values, monthly_period,
         )
-        if latest_date is None or latest_date < monthly_period.end_date:
+        if latest_date is None or (not force and latest_date < monthly_period.end_date):
             return total
 
-        week4_rows = [
+        weekly_labels = {
+            period.label for period in boundaries if period.kind == "week"
+        }
+        weekly_total_rows = [
             index + 1 for index, row in enumerate(values)
             if index > columns["header"]
-            and _subtotal_label(row, description_index) == week4_period.label
+            and _subtotal_label(row, description_index) in weekly_labels
             and index + 1 > latest_transaction_row
         ]
-        insert_after = min(week4_rows) if week4_rows else latest_transaction_row
+        insert_after = max(weekly_total_rows) if weekly_total_rows else latest_transaction_row
         new_row = _build_total_row(sheet_name, monthly_period, total)
         next_index = insert_after
         next_is_blank = (
@@ -501,9 +559,11 @@ def write_monthly_total(sheet_name: str, year: int, month: int) -> PeriodTotal:
             )
         return total
 
-def process_all_units_period(year: int, month: int, 
-                             period_kind: Literal["week", "month"] = "week", 
-                             week_index: int | None = None) -> dict:
+def process_all_units_period(year: int, month: int,
+                             period_kind: Literal["week", "month"] = "week",
+                             week_index: int | None = None,
+                             force: bool = False,
+                             unit_names: list[str] | None = None) -> dict:
     """Loop 5 unit ledger, panggil write_period_total / 
     write_monthly_total. Return dict {unit: PeriodTotal}."""
     results = {}
@@ -516,12 +576,13 @@ def process_all_units_period(year: int, month: int,
             raise ValueError("week_index is required for week period")
         target_period = boundaries[week_index - 1]
         
-    for unit in [*config.UNIT_USAHA, "(2)Rincian Transaksi Harian"]:
+    units = unit_names if unit_names is not None else [*config.UNIT_USAHA, "(2)Rincian Transaksi Harian"]
+    for unit in units:
         try:
             if period_kind == "month":
-                res = write_monthly_total(unit, year, month)
+                res = write_monthly_total(unit, year, month, force=force)
             else:
-                res = write_period_total(unit, target_period)
+                res = write_period_total(unit, target_period, force=force)
             results[unit] = res
         except Exception as e:
             logger.error(f"Failed to process periodic total for unit {unit}: {e}")

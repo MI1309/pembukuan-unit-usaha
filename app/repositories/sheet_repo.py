@@ -426,6 +426,12 @@ def invalidate_cache(sheet_name: str) -> None:
         _record_cache.pop(sheet_name, None)
 
 
+def _evict_sheet_cache(sheet_name: str) -> None:
+    with _cache_lock:
+        _record_cache.pop(sheet_name, None)
+        _worksheet_cache.pop(sheet_name, None)
+
+
 def _ensure_sheet_exists(name: str, headers: list[str]):
     """Return the named worksheet, auto-creating it with *headers* if missing."""
     try:
@@ -503,7 +509,10 @@ def _appended_cell_format(sheet_name: str, column: int) -> dict:
     return cell_format
 
 
-def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
+def append_rows_atomically(
+    rows_by_sheet: list[tuple[str, list]], *, _refreshed_stale_grid: bool = False,
+) -> None:
+    rows_by_sheet = list(rows_by_sheet)
     spreadsheet = get_spreadsheet()
     requests = []
     rows_by_name = {}
@@ -625,12 +634,23 @@ def append_rows_atomically(rows_by_sheet: list[tuple[str, list]]) -> None:
                 }
             })
 
-    _safe_append(
-        lambda: spreadsheet.batch_update({"requests": requests}),
-        [values for rows in rows_by_name.values() for values in rows],
-        list(rows_by_name),
-        "append_rows_atomically",
-    )
+    try:
+        _safe_append(
+            lambda: spreadsheet.batch_update({"requests": requests}),
+            [values for rows in rows_by_name.values() for values in rows],
+            list(rows_by_name),
+            "append_rows_atomically",
+        )
+    except Exception as error:
+        if _refreshed_stale_grid or "no grid with id" not in str(error).casefold():
+            raise
+        for sheet_name in rows_by_name:
+            _evict_sheet_cache(sheet_name)
+        logger.warning(
+            "Refreshing stale worksheet grid after append failure sheets=%s",
+            list(rows_by_name),
+        )
+        return append_rows_atomically(rows_by_sheet, _refreshed_stale_grid=True)
 
     # Daily detail is kept chronological; unit ledgers are sorted by recap.
     for sheet_name in rows_by_name:
@@ -1466,70 +1486,106 @@ def insert_rows_after(sheet_name: str, after_row: int, rows: list[list]) -> None
     if not rows:
         return
     worksheet.insert_rows(rows, row=after_row + 1)
-    total_formats = []
     for offset, values in enumerate(rows):
-        label = next((
-            str(value).strip().upper()
+        if any(
+            str(value).strip().upper().startswith(("SUBTOTAL MINGGU", "TOTAL BULAN"))
             for value in values
-            if str(value).strip().upper().startswith(("SUBTOTAL MINGGU", "TOTAL BULAN"))
-        ), "")
-        if not label:
-            continue
-        is_month_total = label.startswith("TOTAL BULAN")
-        is_daily_detail = sheet_name == "(2)Rincian Transaksi Harian"
-        total_formats.append({
+        ):
+            format_total_row(sheet_name, after_row + offset + 1)
+    invalidate_cache(sheet_name)
+
+
+def format_total_row(sheet_name: str, row_index: int) -> None:
+    """Apply consistent styling to a weekly or monthly total row."""
+    worksheet = get_sheet(sheet_name, create=False)
+    if not worksheet:
+        raise ValueError(f"Worksheet not found: {sheet_name}")
+    values = _retry_google_call(worksheet.row_values, row_index)
+    label = next((
+        str(value).strip().upper()
+        for value in values
+        if str(value).strip().upper().startswith(("SUBTOTAL MINGGU", "TOTAL BULAN"))
+    ), "")
+    if not label:
+        return
+
+    is_daily_detail = sheet_name == "(2)Rincian Transaksi Harian"
+    end_column_index = 8 if is_daily_detail else 9
+    background = (
+        {"red": 0.82, "green": 0.91, "blue": 0.84}
+        if label.startswith("TOTAL BULAN")
+        else {"red": 1.0, "green": 0.94, "blue": 0.72}
+    )
+    label_column_index = 4 if sheet_name == "(2)Rincian Transaksi Harian" else 2
+    requests = [
+        {
             "repeatCell": {
                 "range": {
                     "sheetId": worksheet.id,
-                    "startRowIndex": after_row + offset,
-                    "endRowIndex": after_row + offset + 1,
+                    "startRowIndex": row_index - 1,
+                    "endRowIndex": row_index,
                     "startColumnIndex": 0,
-                    "endColumnIndex": max(len(values), 1),
+                    "endColumnIndex": end_column_index,
                 },
                 "cell": {"userEnteredFormat": {
-                    "backgroundColor": (
-                        {"red": 0.82, "green": 0.91, "blue": 0.84}
-                        if is_month_total
-                        else {"red": 1.0, "green": 0.94, "blue": 0.72}
-                    ),
+                    "backgroundColor": background,
                     "textFormat": {"bold": True},
                     "wrapStrategy": "CLIP",
                 }},
                 "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold,userEnteredFormat.wrapStrategy",
             }
-        })
-        label_column = 2
-        total_formats.append({
+        },
+        {
             "repeatCell": {
                 "range": {
                     "sheetId": worksheet.id,
-                    "startRowIndex": after_row + offset,
-                    "endRowIndex": after_row + offset + 1,
-                    "startColumnIndex": label_column,
-                    "endColumnIndex": label_column + 1,
+                    "startRowIndex": row_index - 1,
+                    "endRowIndex": row_index,
+                    "startColumnIndex": label_column_index,
+                    "endColumnIndex": label_column_index + 1,
                 },
-                "cell": {"userEnteredFormat": {"horizontalAlignment": "LEFT"}},
-                "fields": "userEnteredFormat.horizontalAlignment",
+                "cell": {"userEnteredFormat": {
+                    "horizontalAlignment": "LEFT",
+                    "wrapStrategy": "CLIP",
+                }},
+                "fields": "userEnteredFormat.horizontalAlignment,userEnteredFormat.wrapStrategy",
             }
-        })
-        total_formats.append({
+        },
+        {
             "repeatCell": {
                 "range": {
                     "sheetId": worksheet.id,
-                    "startRowIndex": after_row + offset,
-                    "endRowIndex": after_row + offset + 1,
+                    "startRowIndex": row_index - 1,
+                    "endRowIndex": row_index,
                     "startColumnIndex": 5,
                     "endColumnIndex": 7,
                 },
-                "cell": {"userEnteredFormat": {"horizontalAlignment": "RIGHT"}},
-                "fields": "userEnteredFormat.horizontalAlignment",
+                "cell": {"userEnteredFormat": {
+                    "horizontalAlignment": "RIGHT",
+                    "numberFormat": {"type": "CURRENCY", "pattern": '"Rp" #,##0'},
+                }},
+                "fields": "userEnteredFormat.horizontalAlignment,userEnteredFormat.numberFormat",
+            }
+        },
+    ]
+    if not is_daily_detail:
+        requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": row_index - 1,
+                    "endRowIndex": row_index,
+                    "startColumnIndex": 7,
+                    "endColumnIndex": 8,
+                },
+                "cell": {"userEnteredFormat": {
+                    "horizontalAlignment": "RIGHT",
+                    "numberFormat": {"type": "CURRENCY", "pattern": '"Rp" #,##0'},
+                }},
+                "fields": "userEnteredFormat.horizontalAlignment,userEnteredFormat.numberFormat",
             }
         })
-    if total_formats:
-        _retry_google_call(
-            worksheet.spreadsheet.batch_update,
-            {"requests": total_formats},
-        )
+    _retry_google_call(worksheet.spreadsheet.batch_update, {"requests": requests})
     invalidate_cache(sheet_name)
 
 

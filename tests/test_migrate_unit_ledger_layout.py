@@ -95,3 +95,7 @@ def test_daily_detail_migration_formats_existing_expense_values_as_rupiah():
         "type": "CURRENCY", "pattern": '"Rp" #,##0',
     }
     assert results["(2)Rincian Transaksi Harian"]["status"] == "updated"
+    daily_updates, _ = daily.batch_updates[0]
+    assert daily_updates[0]["range"] == "A5:H6"
+    assert daily_updates[0]["values"][0][-1] == "Transaction ID"
+    assert daily_updates[0]["values"][1][7] == "20261116-TAF-0123abcd"

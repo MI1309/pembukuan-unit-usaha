@@ -3,7 +3,11 @@ import logging
 
 from app.config import config
 from app.repositories import sheet_repo
-from app.setup_reference_structure import LEDGER_HEADERS
+from app.setup_reference_structure import (
+    DAILY_DETAIL_HEADERS,
+    LEDGER_HEADERS,
+    _canonical_daily_detail_rows,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,19 +123,17 @@ def _daily_detail_plan(values: list[list]) -> dict:
         return {"status": "skip", "reason": "header row not found"}
 
     header = [sheet_repo._normalize_header_label(str(value).strip()) for value in values[header_index]]
-    required = {
-        "tanggal", "nama produk /jasa/ barang", "keterangan transaksi", "kuantitas",
-        "satuan (rp)", "pemasukan (rp)", "pengeluaran (rp)", "transaction id",
-    }
-    if len(header) < 8 or not required.issubset(set(header)):
+    canonical_rows = _canonical_daily_detail_rows(values, header_index)
+    if canonical_rows is None:
         return {"status": "skip", "reason": "daily detail headers do not match expected schema"}
 
     return {
         "status": "ready",
         "header_index": header_index,
         "last_row": len(values),
-        "header_changed": False,
+        "header_changed": header != [sheet_repo._normalize_header_label(v) for v in DAILY_DETAIL_HEADERS],
         "swaps": [],
+        "rows": canonical_rows,
     }
 
 
@@ -246,6 +248,13 @@ def migrate_unit_ledgers(apply: bool = False) -> dict:
         daily_plan = _daily_detail_plan(sheet_repo._retry_google_call(daily_sheet.get_all_values))
         results[daily_name] = daily_plan
         if daily_plan["status"] == "ready" and apply:
+            daily_sheet.batch_update(
+                [{
+                    "range": f"A{daily_plan['header_index'] + 1}:H{daily_plan['last_row']}",
+                    "values": [DAILY_DETAIL_HEADERS, *daily_plan["rows"]],
+                }],
+                value_input_option="USER_ENTERED",
+            )
             sheet_repo._retry_google_call(
                 daily_sheet.spreadsheet.batch_update,
                 {"requests": _daily_detail_format_requests(

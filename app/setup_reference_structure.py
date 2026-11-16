@@ -13,9 +13,14 @@ LEDGER_HEADERS = [
     "Tanggal", "Nama Barang/Jasa /Produk", "Keterangan Transaksi",
     "Kuantitas", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Sisa Saldo", "Transaction ID",
 ]
+DAILY_DETAIL_HEADERS = [
+    "Tanggal", "Nama Produk /Jasa/ Barang", "Keterangan Transaksi",
+    "Kuantitas", "Satuan (Rp)", "Pemasukan (Rp)", "Pengeluaran (Rp)",
+    "Transaction ID",
+]
 SPECS = [
     {"name": "(1)Rekap Bulanan ", "headers": ["Bulan", "Produk/Jasa/Barang", "Kuantitas", "Satuan", "Total (Rp)", "Jumlah Transaksi"], "freeze": 1},
-    {"name": "(2)Rincian Transaksi Harian", "title": "Industri Pertanian Terpadu Lentera Farm", "headers": ["Tanggal", "Nama Produk /Jasa/ Barang", "Keterangan Transaksi", "Kuantitas", "Satuan (Rp)", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Transaction ID"], "header_row": 5, "freeze": 5},
+    {"name": "(2)Rincian Transaksi Harian", "title": "Industri Pertanian Terpadu Lentera Farm", "headers": DAILY_DETAIL_HEADERS, "header_row": 5, "freeze": 5},
     {"name": "(3)Pertanian ", "title": "Kakorlap Unit Usaha Pertanian", "headers": LEDGER_HEADERS, "freeze": 2},
     {"name": "(4)Ternak Ayam Fazza", "title": "Kakorlap Unit Usaha Ternak Ayam Fazza : Agus Adip", "headers": LEDGER_HEADERS, "freeze": 2},
     {"name": "(5)Ternak Ayam Emran", "title": "Kakorlap Unit Usaha Ternak Ayam Emran: Agus Adip", "headers": LEDGER_HEADERS, "freeze": 2},
@@ -58,6 +63,53 @@ def _column_name(column: int) -> str:
         column, remainder = divmod(column - 1, 26)
         name = chr(65 + remainder) + name
     return name
+
+
+def _canonical_daily_detail_rows(values: list[list], header_index: int) -> list[list] | None:
+    header = values[header_index] if 0 <= header_index < len(values) else []
+    normalized = [sheet_repo._normalize_header_label(value) for value in header]
+    source_columns = {
+        "date": next((i for i, value in enumerate(normalized) if value in {"tanggal", "tgl"}), None),
+        "name": next((i for i, value in enumerate(normalized) if value in {"nama produk /jasa/ barang", "nama produk", "produk"}), None),
+        "description": next((i for i, value in enumerate(normalized) if value in {"keterangan transaksi", "keterangan"}), None),
+        "quantity": next((i for i, value in enumerate(normalized) if value in {"kuantitas", "qty"}), None),
+        "unit": next((i for i, value in enumerate(normalized) if value in {"satuan (rp)", "satuan"}), None),
+        "income": next((i for i, value in enumerate(normalized) if value in {"pemasukan (rp)", "pemasukan"}), None),
+        "expense": next((i for i, value in enumerate(normalized) if value in {"pengeluaran (rp)", "pengeluaran"}), None),
+        "balance": next((i for i, value in enumerate(normalized) if value == "sisa saldo"), None),
+        "tx_id": next((i for i, value in enumerate(normalized) if value == "transaction id"), None),
+    }
+    required = {"date", "name", "description", "quantity", "unit", "income", "expense", "tx_id"}
+    if not required.issubset(source_columns) or any(source_columns[key] is None for key in required):
+        return None
+
+    output = []
+    for row in values[header_index + 1:]:
+        if not any(str(value).strip() for value in row):
+            output.append([""] * len(DAILY_DETAIL_HEADERS))
+            continue
+        label = next((
+            str(value).strip() for value in row
+            if str(value).strip().upper().startswith(("SUBTOTAL MINGGU", "TOTAL BULAN"))
+        ), "")
+        income_index = source_columns["income"]
+        expense_index = source_columns["expense"]
+        income = parse_amount(row[income_index]) if income_index < len(row) else 0
+        expense = parse_amount(row[expense_index]) if expense_index < len(row) else 0
+        if label:
+            output.append(["", "", "", "", label, income, expense, ""])
+            continue
+
+        canonical = [""] * len(DAILY_DETAIL_HEADERS)
+        for field, target_index in {
+            "date": 0, "name": 1, "description": 2, "quantity": 3,
+            "unit": 4, "income": 5, "expense": 6, "tx_id": 7,
+        }.items():
+            source_index = source_columns[field]
+            if source_index < len(row):
+                canonical[target_index] = row[source_index]
+        output.append(canonical)
+    return output
 
 
 def _looks_like_legacy_sale(row: list) -> bool:
@@ -125,9 +177,7 @@ def repair_existing_sheet_layout(sheet_name: str, apply: bool = False) -> dict:
     if not values:
         return {"sheet": sheet_name, "status": "empty"}
 
-    header_row_number = 1
-    if len(values) >= 2 and any(str(v).strip() for v in values[1]):
-        header_row_number = 2
+    header_row_number = sheet_repo._detect_header_row_index(sheet_name, values) + 1
 
     header_row = values[header_row_number - 1]
     repaired = _repair_existing_header_row(header_row)
@@ -192,13 +242,26 @@ def _ensure_spec(spreadsheet, spec: dict, apply: bool) -> str:
             worksheet.update(range_name=f"A1:{end_column}1", values=[headers])
             action = "HEADER ADDED"
     elif str(existing_header[0]).strip().lower() == headers[0].lower():
-        if not apply:
-            return "STANDARDIZE HEADER"
-        worksheet.update(
-            range_name=f"A{header_row}:{end_column}{header_row}",
-            values=[headers],
-        )
-        action = "HEADER STANDARDIZED"
+        if spec["name"] == "(2)Rincian Transaksi Harian":
+            all_values = worksheet.get_all_values()
+            daily_rows = _canonical_daily_detail_rows(all_values, header_index)
+            if daily_rows is None:
+                return "SKIP: daily detail data headers do not match expected schema"
+            if not apply:
+                return "MIGRATE DAILY DETAIL BALANCE COLUMN"
+            worksheet.update(
+                range_name=f"A{header_row}:I{len(all_values)}",
+                values=[headers, *daily_rows],
+            )
+            action = "DAILY DETAIL BALANCE COLUMN ADDED"
+        else:
+            if not apply:
+                return "STANDARDIZE HEADER"
+            worksheet.update(
+                range_name=f"A{header_row}:{end_column}{header_row}",
+                values=[headers],
+            )
+            action = "HEADER STANDARDIZED"
     elif (spec.get("insert_legacy_header") and values
           and any(str(value).strip() for value in values[0])):
         if not apply:

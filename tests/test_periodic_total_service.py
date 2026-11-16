@@ -14,6 +14,17 @@ def test_is_subtotal_row():
     assert is_subtotal_row(["2026-01-01", "Telur", "Jual Telur"]) is False
     assert is_subtotal_row([]) is False
 
+
+def test_total_row_balance_is_income_minus_expense():
+    from app.services.periodic_total_service import _build_total_row
+
+    period = Period("SUBTOTAL MINGGU 1", date(2026, 1, 1), date(2026, 1, 7), "week")
+    deficit = _build_total_row("Unit", period, PeriodTotal(period, 100, 150, 900))
+    surplus = _build_total_row("Unit", period, PeriodTotal(period, 150, 100, -900))
+
+    assert deficit[7] == -50
+    assert surplus[7] == 50
+
 @patch("app.repositories.sheet_repo.get_sheet")
 def test_compute_period_total(mock_get_sheet):
     mock_worksheet = MagicMock()
@@ -157,8 +168,9 @@ def test_daily_subtotal_is_inserted_after_last_data_row(
     _, after_row, inserted_rows = mock_insert.call_args.args
     assert after_row == 8
     assert len(inserted_rows[0]) == 8
-    assert inserted_rows[0][2] == period.label
+    assert inserted_rows[0][4] == period.label
     assert inserted_rows[0][5:7] == [1200, 0]
+    assert inserted_rows[0][7] == ""
 
 @patch("app.repositories.sheet_repo.get_sheet")
 def test_insert_rows_after_uses_physical_row_number(mock_get_sheet):
@@ -178,6 +190,10 @@ def test_insert_rows_after_colors_weekly_and_monthly_totals_differently(mock_get
 
     worksheet = MagicMock()
     worksheet.id = 42
+    worksheet.row_values.side_effect = [
+        ["2026-10-31", "", "SUBTOTAL MINGGU 4", "", "", 100, 0, 100, ""],
+        ["2026-10-31", "", "TOTAL BULAN Oktober 2026", "", "", 100, 0, 100, ""],
+    ]
     mock_get_sheet.return_value = worksheet
     rows = [
         ["2026-10-31", "", "SUBTOTAL MINGGU 4", "", "", 100, 0, 100, ""],
@@ -186,20 +202,22 @@ def test_insert_rows_after_colors_weekly_and_monthly_totals_differently(mock_get
 
     insert_rows_after("Unit", 10, rows)
 
-    requests = worksheet.spreadsheet.batch_update.call_args.args[0]["requests"]
-    colors = [
-        requests[index]["repeatCell"]["cell"]["userEnteredFormat"]["backgroundColor"]
-        for index in (0, 3)
-    ]
+    batch_calls = worksheet.spreadsheet.batch_update.call_args_list
+    requests = [call.args[0]["requests"] for call in batch_calls]
+    formats = [[request["repeatCell"] for request in batch] for batch in requests]
+    colors = [formats[index][0]["cell"]["userEnteredFormat"]["backgroundColor"] for index in (0, 1)]
     assert colors == [
         {"red": 1.0, "green": 0.94, "blue": 0.72},
         {"red": 0.82, "green": 0.91, "blue": 0.84},
     ]
-    assert [requests[index]["repeatCell"]["range"]["startRowIndex"] for index in (0, 3)] == [10, 11]
-    assert all(
-        request["repeatCell"]["cell"]["userEnteredFormat"].get("wrapStrategy") == "CLIP"
-        for request in (requests[0], requests[3])
-    )
+    assert [formats[index][0]["range"]["startRowIndex"] for index in (0, 1)] == [10, 11]
+    assert all(formats[index][0]["cell"]["userEnteredFormat"]["wrapStrategy"] == "CLIP" for index in (0, 1))
+    assert all(formats[index][0]["cell"]["userEnteredFormat"]["textFormat"]["bold"] for index in (0, 1))
+    assert len(formats[0]) == 4
+    assert formats[0][3]["range"]["startColumnIndex"] == 7
+    assert formats[0][3]["cell"]["userEnteredFormat"]["numberFormat"] == {
+        "type": "CURRENCY", "pattern": '"Rp" #,##0',
+    }
 
 @patch("app.repositories.sheet_repo.get_sheet")
 def test_daily_total_style_is_limited_to_label_and_amount_columns(mock_get_sheet):
@@ -207,6 +225,7 @@ def test_daily_total_style_is_limited_to_label_and_amount_columns(mock_get_sheet
 
     worksheet = MagicMock()
     worksheet.id = 42
+    worksheet.row_values.return_value = ["", "", "", "", "SUBTOTAL MINGGU 1", 1200, 0, ""]
     mock_get_sheet.return_value = worksheet
 
     insert_rows_after(
@@ -214,14 +233,19 @@ def test_daily_total_style_is_limited_to_label_and_amount_columns(mock_get_sheet
         [["", "", "", "", "SUBTOTAL MINGGU 1", 1200, 0, ""]],
     )
 
-    formatted_range = worksheet.spreadsheet.batch_update.call_args.args[0]["requests"][0]["repeatCell"]["range"]
-    assert formatted_range["startColumnIndex"] == 0
-    assert formatted_range["endColumnIndex"] == 8
     requests = worksheet.spreadsheet.batch_update.call_args.args[0]["requests"]
-    assert requests[1]["repeatCell"]["range"]["startColumnIndex"] == 2
-    assert requests[1]["repeatCell"]["cell"]["userEnteredFormat"]["horizontalAlignment"] == "LEFT"
-    assert requests[2]["repeatCell"]["range"]["startColumnIndex"] == 5
-    assert requests[2]["repeatCell"]["cell"]["userEnteredFormat"]["horizontalAlignment"] == "RIGHT"
+    formats = [request["repeatCell"] for request in requests]
+    assert formats[0]["range"]["endColumnIndex"] == 8
+    assert formats[1]["range"]["startColumnIndex"] == 4
+    assert formats[1]["cell"]["userEnteredFormat"] == {
+        "horizontalAlignment": "LEFT", "wrapStrategy": "CLIP",
+    }
+    assert formats[2]["range"]["startColumnIndex"] == 5
+    assert formats[2]["cell"]["userEnteredFormat"]["horizontalAlignment"] == "RIGHT"
+    assert formats[2]["cell"]["userEnteredFormat"]["numberFormat"] == {
+        "type": "CURRENCY", "pattern": '"Rp" #,##0',
+    }
+    assert len(formats) == 3
 
 @patch("app.repositories.sheet_repo.insert_rows_after")
 @patch("app.services.periodic_total_service.compute_period_total")
@@ -278,6 +302,31 @@ def test_week_three_and_four_wait_for_their_end_dates(
     write_period_total("Unit", period)
 
     mock_insert.assert_called_once()
+    _, after_row, inserted_rows = mock_insert.call_args.args
+    assert after_row == 2
+    assert inserted_rows[0][2] == period.label
+
+
+@patch("app.repositories.sheet_repo.insert_rows_after")
+@patch("app.services.periodic_total_service.compute_period_total")
+@patch("app.repositories.sheet_repo.get_sheet")
+@patch("app.services.periodic_total_service.ensure_sorted")
+def test_force_weekly_subtotal_uses_max_transaction_date(
+    mock_sorted, mock_get_sheet, mock_compute, mock_insert,
+):
+    from app.services.periodic_total_service import get_period_boundaries
+
+    worksheet = MagicMock()
+    mock_get_sheet.return_value = worksheet
+    period = get_period_boundaries(2026, 11)[2]
+    worksheet.get_all_values.return_value = [
+        ["Tanggal", "Produk", "Keterangan", "Qty", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Sisa Saldo", "Transaction ID"],
+        ["2026-11-18", "Produk", "", "1", "unit", "500", "0", "500", "TX1"],
+    ]
+    mock_compute.return_value = PeriodTotal(period, 500, 0, 500)
+
+    write_period_total("Unit", period, force=True)
+
     _, after_row, inserted_rows = mock_insert.call_args.args
     assert after_row == 2
     assert inserted_rows[0][2] == period.label
@@ -345,3 +394,26 @@ def test_normalize_row_formatting_repairs_leading_blank_and_compact_date(mock_ge
     _, start_row, end_row, rows = mock_rewrite.call_args.args
     assert (start_row, end_row) == (2, 2)
     assert rows == [["2026-11-16", "Produk A", "Pembelian", "1", "kg", "500", "0", "500", "20261116-ABC-12345678"]]
+
+
+@patch("app.repositories.sheet_repo.rewrite_period_block")
+@patch("app.repositories.sheet_repo.get_sheet")
+def test_normalize_sheet_rows_trims_shifted_overflow(mock_get_sheet, mock_rewrite):
+    from app.services.periodic_total_service import normalize_sheet_rows
+
+    worksheet = MagicMock()
+    mock_get_sheet.return_value = worksheet
+    worksheet.get_all_values.return_value = [
+        ["Tanggal", "Nama Barang", "Keterangan Transaksi", "Kuantitas", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Sisa Saldo", "Transaction ID"],
+        ["", "20261116", "Produk A", "Pembelian", "1", "kg", "500", "0", "500", "20261116-ABC-12345678", "EXTRA"],
+        ["NO-2", "20261117", "Produk B", "Pembelian", "2", "kg", "600", "0", "600", "20261117-ABC-12345679", "EXTRA"],
+    ]
+
+    changed = normalize_sheet_rows("(3)Pertanian ")
+
+    assert changed == 2
+    rows = mock_rewrite.call_args.args[3]
+    assert rows == [
+        ["2026-11-16", "Produk A", "Pembelian", "1", "kg", "500", "0", "500", "20261116-ABC-12345678"],
+        ["2026-11-17", "Produk B", "Pembelian", "2", "kg", "600", "0", "600", "20261117-ABC-12345679"],
+    ]

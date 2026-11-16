@@ -222,8 +222,9 @@ class SheetStructureTests(unittest.TestCase):
         sheet_name = "(2)Rincian Transaksi Harian"
         worksheet = unittest.mock.Mock(id=17)
         worksheet.get_all_values.return_value = [
-            ["Title"], ["Subtitle"], ["Period"], [], ["Tanggal", "Produk"],
-            ["2026-11-16", "Item existing"],
+            ["Title"], ["Subtitle"], ["Period"], [],
+            ["Tanggal", "Nama Produk", "Keterangan", "Kuantitas", "Satuan", "Pemasukan", "Pengeluaran", "Transaction ID"],
+            ["2026-11-16", "Item existing", "", "1", "unit", 100, 0, "tx-existing"],
         ]
         spreadsheet = unittest.mock.Mock()
         new_rows = [
@@ -243,11 +244,41 @@ class SheetStructureTests(unittest.TestCase):
         sort_request = next(request["sortRange"] for request in requests if "sortRange" in request)
         self.assertEqual(copy_request["pasteType"], "PASTE_FORMAT")
         self.assertEqual(copy_request["source"]["startRowIndex"], 5)
+        self.assertEqual(copy_request["source"]["endColumnIndex"], 8)
         self.assertEqual(copy_request["destination"]["startRowIndex"], 6)
+        self.assertEqual(copy_request["destination"]["endColumnIndex"], 8)
         self.assertEqual(sort_request["range"]["startRowIndex"], 5)
         self.assertEqual(sort_request["range"]["endRowIndex"], 8)
+        self.assertEqual(sort_request["range"]["endColumnIndex"], 8)
         self.assertEqual(sort_request["sortSpecs"][0]["dimensionIndex"], 0)
         self.assertEqual(sort_request["sortSpecs"][1]["dimensionIndex"], 7)
+
+    def test_append_refreshes_stale_worksheet_grid_id_once(self):
+        sheet_name = "(4)Ternak Ayam Fazza"
+        stale = unittest.mock.Mock(id=361071210, title=sheet_name)
+        fresh = unittest.mock.Mock(id=987654321, title=sheet_name)
+        stale.get_all_values.return_value = [LEDGER_HEADERS]
+        fresh.get_all_values.return_value = [LEDGER_HEADERS]
+        spreadsheet = unittest.mock.Mock()
+        spreadsheet.worksheet.return_value = fresh
+        spreadsheet.batch_update.side_effect = [
+            RuntimeError("APIError: [400]: Invalid requests[0].appendCells: No grid with id: 361071210"),
+            None,
+        ]
+        row = ["2026-11-16", "Produk", "", "1", "unit", 100, 0, 100, "20261116-TAF-12345678"]
+
+        with patch.object(sheet_repo, "get_spreadsheet", return_value=spreadsheet), \
+             patch.dict(sheet_repo._worksheet_cache, {sheet_name: stale}), \
+             patch.object(sheet_repo, "_cached_get_all_values", return_value=[LEDGER_HEADERS]), \
+             patch.object(sheet_repo, "_safe_append", side_effect=lambda operation, *_args: operation()), \
+             patch.object(sheet_repo, "invalidate_cache"):
+            sheet_repo.append_rows_atomically([(sheet_name, row)])
+
+        assert spreadsheet.batch_update.call_count == 2
+        first_requests = spreadsheet.batch_update.call_args_list[0].args[0]["requests"]
+        second_requests = spreadsheet.batch_update.call_args_list[1].args[0]["requests"]
+        assert first_requests[0]["appendCells"]["sheetId"] == stale.id
+        assert second_requests[0]["appendCells"]["sheetId"] == fresh.id
 
     def test_find_subtotal_rows_uses_keterangan_header_column(self):
         sheet_name = "(4)Ternak Ayam Fazza"

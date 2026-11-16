@@ -62,6 +62,17 @@ class SheetStructureTests(unittest.TestCase):
             "Keterangan Transaksi": "Penjualan",
         }])
 
+    def test_get_all_records_many_uses_sheet_ttl(self):
+        response = {"Ledger!A:Z": [["Tanggal", "Barang"], ["2026-11-16", "Pakan"]]}
+        record_cache = {}
+        with patch.object(sheet_repo, "_record_cache", record_cache), \
+             patch.object(sheet_repo, "_batch_get_ranges", return_value=response), \
+             patch.object(sheet_repo, "monotonic", return_value=100):
+            records = sheet_repo.get_all_records_many(["Ledger"])
+
+        self.assertEqual(records["Ledger"], [{"Tanggal": "2026-11-16", "Barang": "Pakan"}])
+        self.assertEqual(record_cache["Ledger"][0], 103)
+
     def test_monthly_recap_uses_reference_monthly_sheet(self):
         with patch.object(sales_service, "_sales_rows", return_value=[]), patch.object(
             sales_service, "_replace_recap_rows"

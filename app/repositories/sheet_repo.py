@@ -871,7 +871,7 @@ def get_all_records_many(sheet_names: list[str], skip_subtotals: bool = False) -
                 values = raw.get(range_name, [])
                 records = _records_from_values(values, skip_subtotals=skip_subtotals)
                 if not skip_subtotals:
-                    _record_cache[name] = (monotonic() + _READ_CACHE_SECONDS, records)
+                    _record_cache[name] = (monotonic() + _get_ttl(name), records)
                 records_by_sheet[name] = records
 
         return {

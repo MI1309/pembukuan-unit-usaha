@@ -37,6 +37,28 @@ def _send_duplicate_reply(sender: str, notice: str, duplicates: list[dict]) -> b
             return False
     return True
 
+
+def _safe_lazy_trigger(now, source: str) -> None:
+    try:
+        sales_service._lazy_trigger_recap(now, source)
+    except Exception as error:
+        logging.warning("lazy recap failed: %s", error)
+
+
+def _safe_refresh_current_totals(now, source: str) -> None:
+    try:
+        sales_service._refresh_current_period_totals(now, source)
+    except Exception as error:
+        logging.warning("current totals refresh failed: %s", error)
+
+
+def _start_background_recap(target, source: str) -> None:
+    threading.Thread(
+        target=target,
+        args=(now_tz(), source),
+        daemon=True,
+    ).start()
+
 # setup
 @router.get("/setup")
 def setup_database():
@@ -156,12 +178,6 @@ def process_webhook_payload(data: dict) -> dict:
 
         # Lazy trigger for periodic totals
         if getattr(config, "RECAP_LAZY_TRIGGER_ENABLED", True):
-            def _safe_lazy_trigger(now, source):
-                try:
-                    sales_service._lazy_trigger_recap(now, source)
-                except Exception as e:
-                    logging.warning("lazy recap failed: %s", e)
-
             # Determine category for logging
             category = "transaction"
             if karyawan_service.is_help_command(message, admin=staff):
@@ -173,11 +189,7 @@ def process_webhook_payload(data: dict) -> dict:
             elif karyawan_service.handle_karyawan(message, sender) is not None:
                 category = "karyawan"
 
-            threading.Thread(
-                target=_safe_lazy_trigger,
-                args=(now_tz(), category),
-                daemon=True
-            ).start()
+            _start_background_recap(_safe_lazy_trigger, category)
 
         employee_reply = karyawan_service.handle_karyawan(message, sender)
         if employee_reply is not None:
@@ -230,6 +242,8 @@ def process_webhook_payload(data: dict) -> dict:
                 return {"status": "duplicate"}
             if is_sale:
                 send_whatsapp(sender, reply)
+                if (state or {}).get("saved", 0) > 0 and getattr(config, "RECAP_LAZY_TRIGGER_ENABLED", True):
+                    _start_background_recap(_safe_refresh_current_totals, "transaction_saved")
                 if duplicates:
                     _send_duplicate_reply(
                         sender,
@@ -259,6 +273,8 @@ def process_webhook_payload(data: dict) -> dict:
             webhook_state.log_event(sender, message, "PENDING_CONFIRM")
             return {"status": "pending_confirm"}
         send_whatsapp(sender, reply)
+        if (state or {}).get("saved", 0) > 0 and getattr(config, "RECAP_LAZY_TRIGGER_ENABLED", True):
+            _start_background_recap(_safe_refresh_current_totals, "transaction_saved")
         if duplicates:
             _send_duplicate_reply(
                 sender,

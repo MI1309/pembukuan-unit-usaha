@@ -1,4 +1,5 @@
 import calendar
+import logging
 import re
 from datetime import date, datetime, timedelta
 from threading import RLock
@@ -12,6 +13,7 @@ from app.core.whatsapp import send_whatsapp
 from app.services import periodic_total_service
 
 _SALES_LOCK = RLock()
+logger = logging.getLogger(__name__)
 MONTH_ALIASES = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "mei": 5, "jun": 6,
     "jul": 7, "agu": 8, "agt": 8, "sep": 9, "okt": 10, "nov": 11, "des": 12,
@@ -674,43 +676,65 @@ def _lazy_trigger_recap(now: datetime, trigger_source: str) -> None:
 
     try:
         today = now.date()
-        candidates = [today, today - timedelta(days=1)]
         processed_labels = []
 
-        for candidate in candidates:
-            # Check if candidate is a boundary
-            year, month = candidate.year, candidate.month
-            boundaries = periodic_total_service.get_period_boundaries(year, month)
-            
-            # Weekly boundaries (7, 14, 21)
-            boundary_days = getattr(config, "RECAP_BOUNDARY_DAYS", [7, 14, 21])
-            
-            # Find if this candidate date is an end_date of any period
-            for period in boundaries:
-                if period.end_date == candidate:
-                    # Check flag in _Meta
-                    meta_key = f"recap_done:{period.label}"
-                    try:
-                        sheet_repo._read_archive_manifest(meta_key)
-                        continue # Already done
-                    except ValueError:
-                        pass # Not done yet
-                    
-                    # Process
-                    if period.kind == "week":
-                        week_idx = int(period.label.split("MINGGU")[1].split("(")[0].strip())
-                        periodic_total_service.process_all_units_period(year, month, period_kind="week", week_index=week_idx)
-                    else:
-                        periodic_total_service.process_all_units_period(year, month, period_kind="month")
-                    
-                    # Set flag
-                    sheet_repo._write_archive_manifest(meta_key, {"done_at": now.isoformat(), "source": trigger_source})
-                    processed_labels.append(period.label)
+        previous_month = date(today.year, today.month, 1) - timedelta(days=1)
+        months_to_check = {(today.year, today.month), (previous_month.year, previous_month.month)}
+        for year, month in sorted(months_to_check):
+            for period in periodic_total_service.get_period_boundaries(year, month):
+                if (period.start_date.year, period.start_date.month) != (year, month):
+                    continue
+                if period.end_date > today:
+                    continue
+
+                meta_key = f"recap_done:{period.label}"
+                try:
+                    sheet_repo._read_archive_manifest(meta_key)
+                    continue
+                except ValueError:
+                    pass
+
+                _process_recap_period(year, month, period.kind, period.label)
+                sheet_repo._write_archive_manifest(
+                    meta_key,
+                    {"done_at": now.isoformat(), "source": trigger_source},
+                )
+                processed_labels.append(period.label)
 
         if processed_labels:
-            import logging
-            logging.info(f"recap triggered by {trigger_source} for {', '.join(processed_labels)}")
+            logger.info("recap triggered by %s for %s", trigger_source, ", ".join(processed_labels))
 
     except Exception as e:
-        import logging
-        logging.warning(f"lazy recap failed: {e}")
+        logger.warning("lazy recap failed: %s", e)
+
+
+def _process_recap_period(year: int, month: int, kind: str, label: str) -> None:
+    if kind == "week":
+        period = next(
+            period for period in periodic_total_service.get_period_boundaries(year, month)
+            if period.label == label
+        )
+        week_index = periodic_total_service.get_period_boundaries(year, month).index(period) + 1
+        results = periodic_total_service.process_all_units_period(
+            year, month, period_kind="week", week_index=week_index,
+        )
+    else:
+        results = periodic_total_service.process_all_units_period(year, month, period_kind="month")
+    failures = [unit for unit, result in results.items() if isinstance(result, Exception)]
+    if failures:
+        raise RuntimeError(f"recap failed for {label}, units: {', '.join(failures)}")
+
+
+def _refresh_current_period_totals(now: datetime, trigger_source: str) -> None:
+    if not getattr(config, "RECAP_ENABLED", True):
+        return
+    current_period = periodic_total_service.get_period_for_date(now.date())
+    _process_recap_period(
+        now.year, now.month, "week", current_period.label,
+    )
+    monthly_period = periodic_total_service.get_period_boundaries(now.year, now.month)[-1]
+    _process_recap_period(now.year, now.month, "month", monthly_period.label)
+    logger.info(
+        "running totals refreshed by %s for %s and %s",
+        trigger_source, current_period.label, monthly_period.label,
+    )

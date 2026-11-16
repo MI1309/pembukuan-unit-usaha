@@ -130,6 +130,7 @@ class TransactionIdTests(unittest.TestCase):
     def test_webhook_redelivery_with_same_event_id_does_not_reprocess(self):
         sales_call = Mock(return_value=(True, "reply", {"saved": 1}))
         with patch.object(config, "WEBHOOK_SECRET", "test-secret"), \
+               patch.object(webhook.threading, "Thread") as mock_thread, \
              patch.object(webhook.webhook_state, "is_duplicate_event", side_effect=[False, True]), \
              patch.object(webhook.karyawan_service, "normalize_phone", return_value="628123"), \
              patch.object(webhook.karyawan_service, "is_admin", return_value=True), \
@@ -153,6 +154,12 @@ class TransactionIdTests(unittest.TestCase):
         self.assertEqual(first["status"], "saved")
         self.assertEqual(second["status"], "duplicate")
         sales_call.assert_called_once()
+        self.assertEqual(mock_thread.call_count, 2)
+        self.assertTrue(all(call.kwargs["daemon"] for call in mock_thread.call_args_list))
+        self.assertEqual(
+            {call.kwargs["target"] for call in mock_thread.call_args_list},
+            {webhook._safe_lazy_trigger, webhook._safe_refresh_current_totals},
+        )
 
     def test_webhook_sends_forwardable_message_for_duplicate_transaction(self):
         duplicate_sale = {**self.sale, "transaction_id": "20261115-TAF-0123abcd"}

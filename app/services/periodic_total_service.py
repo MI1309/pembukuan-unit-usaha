@@ -83,12 +83,12 @@ def get_period_for_date(target: date) -> Period:
     return boundaries[3] # Fallback to week 4 if somehow not found
 
 def is_subtotal_row(row: list) -> bool:
-    """True jika kolom Keterangan (index 2) berawalan
-    '[SUBTOTAL MINGGU' atau '[TOTAL BULAN'."""
-    if len(row) > 2:
-        keterangan = str(row[2]).strip().upper()
-        return keterangan.startswith("SUBTOTAL MINGGU") or keterangan.startswith("TOTAL BULAN")
-    return False
+    """Recognize subtotal labels in current and legacy ledger layouts."""
+    return any(
+        str(row[index]).strip().upper().startswith(("SUBTOTAL MINGGU", "TOTAL BULAN"))
+        for index in (2, 3)
+        if index < len(row)
+    )
 
 def compute_period_total(sheet_name: str, period: Period) -> PeriodTotal:
     """
@@ -303,6 +303,7 @@ def write_monthly_total(sheet_name: str, year: int, month: int) -> PeriodTotal:
         boundaries = get_period_boundaries(year, month)
         monthly_period = next(p for p in boundaries if p.kind == "month")
         week4_period = boundaries[3]
+        ensure_sorted(sheet_name, monthly_period)
         
         # Remove old monthly total
         label_prefix = f"TOTAL BULAN"
@@ -325,12 +326,18 @@ def write_monthly_total(sheet_name: str, year: int, month: int) -> PeriodTotal:
         values = worksheet.get_all_values() if worksheet else []
         insert_after = 0
         
-        # Try to find Week 4 subtotal
+        # Place the running monthly total after the latest weekly subtotal.
         week4_label = week4_period.label
+        month_year_label = monthly_period.label.removeprefix("TOTAL BULAN ")
         for idx, row in enumerate(values):
-            if len(row) > 2 and week4_label in str(row[2]):
+            row_label = str(row[2]).strip() if len(row) > 2 else ""
+            if row_label.startswith("SUBTOTAL MINGGU") and month_year_label in row_label:
                 insert_after = idx + 1
-                break
+        if insert_after == 0:
+            for idx, row in enumerate(values):
+                if len(row) > 2 and week4_label in str(row[2]):
+                    insert_after = idx + 1
+                    break
         
         if insert_after == 0:
             # Fallback to last transaction in month

@@ -212,6 +212,21 @@ class SheetStructureTests(unittest.TestCase):
         self.assertEqual(sort_request["sortSpecs"][0]["dimensionIndex"], 0)
         self.assertEqual(sort_request["sortSpecs"][1]["dimensionIndex"], 7)
 
+    def test_find_subtotal_rows_uses_keterangan_header_column(self):
+        sheet_name = "(4)Ternak Ayam Fazza"
+        worksheet = unittest.mock.Mock()
+        values = [
+            ["Title"],
+            ["Tanggal", "Produk", "Keterangan Transaksi", "Kuantitas", "Transaction ID"],
+            ["2026-11-16", "Telur", "jual ke toko", "10 butir", "tx-1"],
+            ["2026-11-21", "", "SUBTOTAL MINGGU 3 (15-21 November 2026)", "", ""],
+        ]
+        with patch.object(sheet_repo, "get_sheet", return_value=worksheet), \
+             patch.object(sheet_repo, "_cached_get_all_values", return_value=values):
+            rows = sheet_repo.find_subtotal_rows(sheet_name, "SUBTOTAL MINGGU 3")
+
+        self.assertEqual(rows, [4])
+
 
 if __name__ == "__main__":
     unittest.main()

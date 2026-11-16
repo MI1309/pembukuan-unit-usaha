@@ -1398,11 +1398,23 @@ def find_subtotal_rows(sheet_name: str, label_prefix: str) -> list[int]:
         return []
 
     found = []
-    # Kolom Keterangan di ledger unit usaha adalah index 3 (kolom D)
+    header_index = _detect_header_row_index(sheet_name, values)
+    header = values[header_index] if header_index < len(values) else []
+    description_columns = [
+        index for index, value in enumerate(header)
+        if _normalize_header_label(value) in {"keterangan", "keterangan transaksi"}
+    ]
+    if not description_columns:
+        description_columns = [2, 3]
+
     for idx, row in enumerate(values):
-        if len(row) > 3:
-            keterangan = str(row[3]).strip().upper()
-            if keterangan.startswith(label_prefix.upper()):
+        if idx == header_index:
+            continue
+        if any(
+            column < len(row)
+            and str(row[column]).strip().upper().startswith(label_prefix.upper())
+            for column in description_columns
+        ):
                 found.append(idx + 1)
     return found
 

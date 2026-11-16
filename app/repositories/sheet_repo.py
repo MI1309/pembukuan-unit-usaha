@@ -13,6 +13,7 @@ from app.config import config
 from app.core.utils import parse_amount
 from app.core.retry import retry_google_api, safe_append_with_idempotency
 from app.core.transaction_id import generate_transaction_id
+from app.core.metrics import track_sheets
 
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive"]
 creds = None
@@ -22,7 +23,13 @@ _spreadsheet_lock = RLock()
 _worksheet_cache = {}
 _record_cache = {}
 _cache_lock = RLock()
-_READ_CACHE_SECONDS = 3
+
+# Optimasi TTL: Master data 30s, Ledger/Logs 3s
+def _get_ttl(sheet_name: str) -> int:
+    name = str(sheet_name or "").strip()
+    if name in {config.SHEET_KARYAWAN, "_Meta"} or "Produk" in name:
+        return 30
+    return 3
 _SIMPLE_SHEET_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _TRANSACTION_ID = re.compile(r"^\d{8}-[A-Z]{3}-[A-Fa-f0-9]{8}$")
 logger = logging.getLogger(__name__)
@@ -55,6 +62,9 @@ ARSIP_HEADERS: list[str] = [
 
 
 def _retry_google_call(operation, *args, **kwargs):
+    # Track metrics if it's a gspread/google API call
+    op_name = getattr(operation, "__name__", str(operation))
+    track_sheets(op_name)
     return retry_google_api()(operation)(*args, **kwargs)
 
 
@@ -199,11 +209,24 @@ def _cached_get_all_values(worksheet):
     cache_key = getattr(worksheet, "title", "unknown")
     with _cache_lock:
         entry = _record_cache.get(cache_key)
-        if entry and now - entry["timestamp"] < _READ_CACHE_SECONDS:
+        ttl = _get_ttl(cache_key)
+        if entry and now - entry["timestamp"] < ttl:
             return entry["values"]
         values = _retry_google_call(worksheet.get_all_values)
         _record_cache[cache_key] = {"timestamp": now, "values": values}
         return values
+
+
+def invalidate_cache(sheet_name: str):
+    with _cache_lock:
+        if sheet_name in _record_cache:
+            del _record_cache[sheet_name]
+
+
+def invalidate_cache_all():
+    with _cache_lock:
+        _record_cache.clear()
+        _worksheet_cache.clear()
 
 
 # ============================================================

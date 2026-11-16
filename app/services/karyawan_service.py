@@ -6,6 +6,8 @@ from threading import RLock
 from app.config import config
 from app.core.utils import format_rupiah, now_tz, parse_amount
 from app.repositories import sheet_repo
+from app.core.cache import master_data_cache
+from app.core.metrics import metrics
 
 EMPLOYEE_SHEET = "Database Karyawan"
 ATTENDANCE_SHEET = "Presensi Karyawan"
@@ -89,11 +91,20 @@ def _employee_view(record: dict, row: int) -> dict:
 
 
 def _employees() -> list[dict]:
-    return [
+    cache_key = "employees_list"
+    cached = master_data_cache.get(cache_key)
+    if cached is not None:
+        metrics.increment("master_data_cache_hit", {"source": "employees"})
+        return cached
+        
+    metrics.increment("master_data_cache_miss", {"source": "employees"})
+    data = [
         _employee_view(record, row_number)
         for row_number, record in enumerate(sheet_repo.get_all_records(EMPLOYEE_SHEET), start=2)
         if str(record.get("NIK", "")).strip()
     ]
+    master_data_cache.set(cache_key, data)
+    return data
 
 
 def get_karyawan(nik: str) -> dict | None:

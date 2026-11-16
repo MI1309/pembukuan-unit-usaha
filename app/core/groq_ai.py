@@ -1,12 +1,17 @@
 import json
 import re
 import time
+import hashlib
+import logging
 
 import requests
 
 from app.config import config
-from app.core.utils import now_tz
+from app.core.utils import now_tz, parse_amount
+from app.core.cache import groq_cache
+from app.core.metrics import track_groq
 
+logger = logging.getLogger(__name__)
 
 def _extract_json(content: str) -> str:
     raw = re.sub(r"<think>[\s\S]*?</think>", "", str(content or ""), flags=re.I).strip()
@@ -19,38 +24,108 @@ def _extract_json(content: str) -> str:
 
 def _sales_prompt(today: str) -> str:
     products = "; ".join(
-        f"{item['nama']} (kata kunci: {', '.join(item['kunci'])}; satuan: {item['satuan']})"
+        f"{item['nama']} ({', '.join(item['kunci'])}; {item['satuan']})"
         for item in config.KATALOG
     )
     units = "; ".join(config.UNIT_USAHA)
     return (
-        "Kamu adalah asisten admin pencatatan transaksi Industri Pertanian Terpadu Lentera Farm.\n"
-        f"Tanggal hari ini: {today}.\n"
-        "Ekstrak SEMUA transaksi penjualan atau pembelian dalam pesan, satu objek per barang/baris, menjadi JSON valid tanpa markdown.\n"
+        f"Admin Industri Pertanian Terpadu. Today: {today}. JSON valid only.\n"
         'Format: {"transaksi":[{"produk":"","keterangan":"","kuantitas":0,"satuan":"",'
         '"total_harga":null,"harga_satuan":null,"tanggal":"YYYY-MM-DD","is_penjualan":true,"unit_usaha":""}]}\n'
-        "Aturan ketat:\n"
-        "1. Jika bukan perintah mencatat penjualan/pembelian (rekap, salam, pertanyaan), keluarkan {\"transaksi\":[]} .\n"
-        "2. Jangan lewatkan atau gabungkan transaksi berbeda.\n"
-        "3. Kata pembelian, beli, atau pemb sebagai penanda pengeluaran; penj atau jual sebagai penanda pemasukan.\n"
-        f"4. Untuk penjualan, katalog valid hanya: {products}. Produk lain tetap keluarkan agar ditolak aplikasi.\n"
-        "5. Pembelian boleh berupa barang/jasa apa pun, termasuk Listrik, UHK, Penyusutan, Konsumsi Dapur, dan PDAM. "
-        f"Set is_penjualan=false dan isi unit_usaha dengan nama tab persis dari daftar ini: {units}.\n"
-        "6. Setiap transaksi wajib berisi produk/jasa, keterangan transaksi, kuantitas, satuan, dan harga_satuan. "
-        "Jangan mengarang kuantitas atau satuan; jika tidak disebut isi kuantitas 0 dan satuan kosong agar aplikasi meminta koreksi.\n"
-        "7. Jangan menebak unit pembelian. Jika pesan tidak menyebut unit dengan jelas, isi unit_usaha kosong.\n"
-        "8. kuantitas adalah jumlah barang/jasa, bukan harga. Satuan huruf besar sesuai pesan/katalog.\n"
-        "9. Angka keluaran berupa number polos. Titik ribuan diabaikan; koma desimal. Contoh 1.400.000=1400000, "
-        "2,5 jt=2500000, 2,3 ribu=2300. rb/ribu/k dikali 1000; jt/juta dikali 1000000.\n"
-        "10. Cara yang diutamakan adalah harga_satuan per unit; sistem akan menghitung total otomatis = kuantitas × harga_satuan. "
-        "Jika total_harga juga disebut, tetap boleh diterima, tapi tidak wajib.\n"
-        "11. Keterangan transaksi harus mengikuti pesan; tanggal gunakan YYYY-MM-DD dan default hari ini.\n"
-        "12. Jangan berikan reasoning, tag thinking, atau teks di luar JSON."
+        "Strict rules:\n"
+        "1. Not a transaction -> {\"transaksi\":[]}.\n"
+        "2. Buy/beli/pemb -> is_penjualan=false, unit_usaha from: " + units + ".\n"
+        "3. Sell/jual/penj -> is_penjualan=true, valid catalog: " + products + ".\n"
+        "4. No reasoning, no markdown, just compact JSON."
     )
 
 
 def _retryable_status(status: int) -> bool:
     return status == 429 or status >= 500
+
+
+def _is_likely_transaction(message: str) -> bool:
+    """Guard to filter out non-transaction messages."""
+    text = message.strip().lower()
+    # Skip short messages, greetings, or common commands
+    if len(text) < 5:
+        return False
+    if not any(c.isdigit() for c in text):
+        return False
+    
+    skip_keywords = {"help", "rekap", "gaji", "absen", "halo", "hai", "menu", "backup", "slip", "pinjam"}
+    if any(kw in text for kw in skip_keywords):
+        return False
+        
+    # Check for transaction keywords
+    tx_keywords = {"jual", "penj", "beli", "pemb", "laku", "terjual", "kilo", "kg", "butir", "ekor", "unit"}
+    if any(kw in text for kw in tx_keywords):
+        return True
+        
+    # Check if it contains pipe format
+    if "|" in text:
+        return True
+        
+    return False
+
+
+def _local_parse_regex(message: str) -> dict | None:
+    """Regex-based parser for common transaction formats."""
+    transactions = []
+    lines = message.splitlines()
+    
+    # Patterns for: (jual/beli) (produk) (qty) (satuan) (harga) (unit)
+    # 1. jual telur 100 butir 1500
+    # 2. beli listrik 1 bulan 1200000 unit Pertanian
+    # 3. telur 100 butir 1500
+    # 4. penj telur fazza | jual ke warung | 100 butir | 1500
+    
+    for line in lines:
+        line = line.strip()
+        if not line: continue
+        
+        # Action type
+        is_sale = True
+        action_match = re.match(r"^(jual|penjualan|penj|beli|pembelian|pemb)\s+(.+)$", line, re.I)
+        if action_match:
+            action, rest = action_match.groups()
+            is_sale = action.lower() in {"jual", "penjualan", "penj"}
+            line_to_parse = rest
+        else:
+            line_to_parse = line
+            
+        # Try pipe format first (existing logic)
+        pipe_fields = [f.strip() for f in line_to_parse.split("|")]
+        if len(pipe_fields) >= 3:
+            # Handle the rest of pipe parsing... but we'll use a more generic regex for simplicity
+            pass
+
+        # Generic format: <product> <qty> <unit> <price> [unit <biz_unit>]
+        # Example: "telur ayam fazza 100 butir 1500"
+        # Example: "listrik 1 bulan 1200000 unit Pertanian"
+        pattern = r"^(.*?)\s+([\d.,]+)\s+([a-zA-Z]+)\s+([\d.,\s]*(?:jt|ribu|rb|k|juta)?)(?:\s+unit\s+(.+))?$"
+        match = re.search(pattern, line_to_parse, re.I)
+        
+        if match:
+            product, qty, unit, price, biz_unit = match.groups()
+            
+            # Basic validation
+            nominal = parse_amount(price)
+            if nominal <= 0: continue
+            
+            transactions.append({
+                "produk": product.strip(),
+                "keterangan": f"Auto-parsed: {line}",
+                "kuantitas": qty.replace(".", "").replace(",", "."),
+                "satuan": unit.upper(),
+                "total_harga": None,
+                "harga_satuan": nominal,
+                "is_penjualan": is_sale,
+                "unit_usaha": biz_unit.strip() if biz_unit else "",
+                "tanggal": now_tz().strftime("%Y-%m-%d")
+            })
+            
+    return {"transaksi": transactions} if transactions else None
 
 
 def _parse_pipe_transactions(message: str) -> dict | None:
@@ -93,11 +168,34 @@ def _parse_pipe_transactions(message: str) -> dict | None:
 
 
 def analyze_sales(message: str) -> dict:
+    # 1. Guard: Check if likely a transaction
+    if not _is_likely_transaction(message):
+        track_groq("skipped_guard")
+        return {"transaksi": []}
+
+    # 2. Local Parse: Try regex/pipe first
     pipe_transactions = _parse_pipe_transactions(message)
     if pipe_transactions:
+        track_groq("local_parse_pipe")
         return pipe_transactions
+        
+    local_transactions = _local_parse_regex(message)
+    if local_transactions:
+        track_groq("local_parse_regex")
+        return local_transactions
+
+    # 3. Cache: Check if we have this message cached
+    msg_hash = hashlib.sha256(message.strip().lower().encode()).hexdigest()
+    cached = groq_cache.get(msg_hash)
+    if cached:
+        track_groq("cache_hit")
+        return cached
+
+    # 4. API Call: If all else fails, use Groq
     if not config.GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY belum diisi.")
+        
+    track_groq("api_call")
     today = now_tz().strftime("%Y-%m-%d")
     payload = {
         "model": config.GROQ_MODEL,
@@ -106,7 +204,7 @@ def analyze_sales(message: str) -> dict:
             {"role": "user", "content": message},
         ],
         "temperature": 0.1,
-        "max_tokens": 6000,
+        "max_tokens": 512,  # Optimized from 6000
         "response_format": {"type": "json_object"},
     }
     last_error = None
@@ -124,19 +222,27 @@ def analyze_sales(message: str) -> dict:
                 continue
             if response.status_code < 200 or response.status_code >= 300:
                 raise RuntimeError(f"Groq API error {response.status_code}: {response.text[:500]}")
+            
             body = response.json()
             choice = body["choices"][0]
-            if choice.get("finish_reason") == "length":
-                raise RuntimeError("Respons Groq terpotong. Kurangi jumlah transaksi atau kirim dalam beberapa pesan.")
             content = choice["message"]["content"]
             parsed = json.loads(_extract_json(content))
+            
+            # Normalize structure
+            result = {"transaksi": []}
             if isinstance(parsed, dict) and isinstance(parsed.get("transaksi"), list):
-                return parsed
-            if isinstance(parsed, list):
-                return {"transaksi": parsed}
-            if isinstance(parsed, dict) and parsed.get("produk"):
-                return {"transaksi": [parsed]}
-            raise ValueError("Struktur JSON respons Groq tidak sesuai.")
+                result = parsed
+            elif isinstance(parsed, list):
+                result = {"transaksi": parsed}
+            elif isinstance(parsed, dict) and parsed.get("produk"):
+                result = {"transaksi": [parsed]}
+            else:
+                raise ValueError("Struktur JSON respons Groq tidak sesuai.")
+
+            # Cache the successful result
+            groq_cache.set(msg_hash, result)
+            return result
+
         except (requests.Timeout, requests.ConnectionError) as error:
             last_error = error
             if attempt == 0:

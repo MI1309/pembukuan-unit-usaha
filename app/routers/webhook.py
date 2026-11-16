@@ -73,40 +73,48 @@ def webhook_health_check():
 
 # proses payload webhook
 def process_webhook_payload(data: dict) -> dict:
-    # logika untuk memproses payload webhook
+    from app.core.metrics import metrics
+    
     sender = ""
     message = ""
     authorized = False
+    
     try:
-        # validasi secret
-        expected_secret = str(config.WEBHOOK_SECRET or "")
-        if not expected_secret or _first_value(data, "secret") != expected_secret:
-            raise HTTPException(status_code=401, detail="Unauthorized")
-
-        # validasi duplikasi event
-        event_id = _first_value(data, "id", "message_id", "msg_id")
-        if webhook_state.is_duplicate_event(event_id):
-            return {"status": "duplicate"}
-
+        # 1. Rate Limit (Cheapest check, before anything else)
         raw_sender = _first_value(data, "sender", "from", "phone")
         sender = karyawan_service.normalize_phone(raw_sender)
         message = _first_value(data, "message", "text", "body", "caption")
+        
+        if sender and webhook_state.is_rate_limited(sender):
+            metrics.increment("webhook_rate_limited", {"sender": sender})
+            # Skip WA reply if heavily limited or spammy to save quota
+            return {"status": "rate_limited"}
+
+        # 2. Validasi secret
+        expected_secret = str(config.WEBHOOK_SECRET or "")
+        if not expected_secret or _first_value(data, "secret") != expected_secret:
+            metrics.increment("webhook_unauthorized")
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        # 3. Validasi duplikasi event (Dedupe)
+        event_id = _first_value(data, "id", "message_id", "msg_id")
+        if webhook_state.is_duplicate_event(event_id, message, sender):
+            metrics.increment("webhook_duplicate")
+            return {"status": "duplicate"}
+
         if not sender:
             webhook_state.log_event("", message, "INVALID_SENDER", error="sender_not_found")
             return {"status": "error", "message": "Sender tidak ditemukan."}
-        if len(message) < 3 and not re.fullmatch(r"ya|no", message, re.I):
+            
+        if len(message.strip()) < 3 and not re.fullmatch(r"ya|no", message, re.I):
             return {"status": "ignored", "reason": "empty_or_short"}
 
-        # validasi rate limit
+        # validasi admin/staff
         staff = karyawan_service.is_admin(sender)
         backup_command = re.fullmatch(r"backup(?:\s+sekarang)?", message, re.I)
         if staff and backup_command:
             authorized = True
-            if webhook_state.is_rate_limited(sender):
-                send_whatsapp(sender, "⚠️ Terlalu banyak pesan. Coba lagi dalam 1 menit.")
-                return {"status": "rate_limited"}
-
-        # proses perintah backup manual
+            # proses perintah backup manual
             result = backup_service.manual_backup()
             if result["status"] == "success":
                 reply = f"✅ Backup berhasil dibuat:\n{result['name']}"
@@ -134,11 +142,6 @@ def process_webhook_payload(data: dict) -> dict:
             webhook_state.log_event(sender, message, "BLOCKED_NOT_ALLOWED", error="sender_not_allowed")
             return {"status": "blocked", "error": "sender_not_allowed"}
         authorized = True
-
-        if webhook_state.is_rate_limited(sender):
-            webhook_state.log_event(sender, message, "RATE_LIMITED", error="too_many_requests")
-            send_whatsapp(sender, "⚠️ Terlalu banyak pesan. Coba lagi dalam 1 menit.")
-            return {"status": "rate_limited"}
 
         # Lazy trigger for periodic totals
         if getattr(config, "RECAP_LAZY_TRIGGER_ENABLED", True):

@@ -125,7 +125,8 @@ def _unit_rows_before_month(rows: list[list], target_month: date) -> list[tuple[
     archived = []
     target_key = (target_month.year, target_month.month)
     for row_number, row in enumerate(rows[2:], start=3):
-        row_date = _parse_date(row[1] if len(row) > 1 else "")
+        # Gunakan index 0 untuk Tanggal (sesuai layout _save_sale)
+        row_date = _parse_date(row[0] if len(row) > 0 else "")
         if row_date and (row_date.year, row_date.month) < target_key:
             archived.append((row_number, row))
     return archived

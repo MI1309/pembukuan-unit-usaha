@@ -107,8 +107,12 @@ def _save_slip(result: dict) -> None:
     if row_number is None:
         sheet_repo.append_row(PAYROLL_SHEET, values)
     else:
-        for column, value in enumerate(values, start=1):
-            sheet_repo.update_cell(PAYROLL_SHEET, row_number, column, value)
+        # Optimasi: Gunakan update untuk satu baris, bukan update_cell berkali-kali
+        width = len(values)
+        range_name = f"A{row_number}:{sheet_repo._column_name(width)}{row_number}"
+        worksheet = sheet_repo.get_sheet(PAYROLL_SHEET)
+        worksheet.update(range_name=range_name, values=[values])
+        sheet_repo.invalidate_cache(PAYROLL_SHEET)
 
 
 def _slip_text(employee: dict, result: dict) -> str:

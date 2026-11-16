@@ -1,5 +1,6 @@
 import hashlib
 import re
+import logging
 from datetime import datetime, timedelta
 from threading import RLock
 
@@ -8,6 +9,8 @@ import pytz
 from app.config import config
 from app.core.utils import now_tz
 from app.repositories import sheet_repo
+
+logger = logging.getLogger(__name__)
 
 LOG_SHEET = "_Logs"
 LOG_HEADERS = ["Timestamp", "Sender", "Raw Message", "Status", "Faktur", "Error"]
@@ -50,18 +53,32 @@ def _aware_datetime(value) -> datetime | None:
     return timezone.localize(parsed) if parsed.tzinfo is None else parsed.astimezone(timezone)
 
 
-def is_duplicate_event(event_id: str | None) -> bool:
-    if not event_id:
-        return False
+def is_duplicate_event(event_id: str | None, message: str = "", sender: str = "") -> bool:
+    # Hash both event_id and (sender+message) for stronger dedupe
     current = now_tz()
-    fingerprint = hashlib.sha256(str(event_id).encode("utf-8")).hexdigest()
-    ttl = int(getattr(config, "WEBHOOK_DEDUPE_TTL_SECONDS", 180))
+    raw_key = f"{event_id or ''}:{sender}:{message.strip().lower()}"
+    fingerprint = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    
+    # TTL 60 seconds is enough for Fonnte redelivery
+    ttl = 60
+    
     with _STATE_LOCK:
+        # Cleanup expired
         expired = [key for key, timestamp in _SEEN_EVENTS.items() if (current - timestamp).total_seconds() >= ttl]
         for key in expired:
             _SEEN_EVENTS.pop(key, None)
+            
+        # LRU-like limit: 1000 entries
+        if len(_SEEN_EVENTS) > 1000:
+            # Remove oldest
+            oldest = sorted(_SEEN_EVENTS.items(), key=lambda x: x[1])[0][0]
+            _SEEN_EVENTS.pop(oldest, None)
+
         if fingerprint in _SEEN_EVENTS:
+            from app.core.metrics import track_log
+            track_log("duplicate_skipped")
             return True
+            
         _SEEN_EVENTS[fingerprint] = current
         return False
 
@@ -119,22 +136,47 @@ def clear_pending_confirmation(sender: str) -> None:
             sheet_repo.update_cell(PENDING_SHEET, row_number, 2, "")
 
 
+_LOG_HEADERS_READY = False
+_LOG_BUFFER = []
+_LAST_FLUSH = datetime.now()
+
+def flush_logs():
+    global _LOG_BUFFER, _LAST_FLUSH
+    with _STATE_LOCK:
+        if not _LOG_BUFFER:
+            return
+        try:
+            sheet_repo.append_rows_atomically([(LOG_SHEET, row) for row in _LOG_BUFFER])
+            _LOG_BUFFER = []
+            _LAST_FLUSH = datetime.now()
+        except Exception as e:
+            logger.error(f"Failed to flush logs: {e}")
+
 def log_event(sender: str, message: str, status: str, invoice: str = "", error: str = "") -> None:
-    global _LOG_HEADERS_READY
+    global _LOG_HEADERS_READY, _LOG_BUFFER
     try:
-        with _STATE_LOCK:
-            if not _LOG_HEADERS_READY:
-                worksheet = sheet_repo.get_sheet(LOG_SHEET)
-                values = worksheet.get_all_values()
-                if not values:
-                    sheet_repo.append_row(LOG_SHEET, LOG_HEADERS)
-                elif len(values[0]) < len(LOG_HEADERS) or values[0][:len(LOG_HEADERS)] != LOG_HEADERS:
-                    worksheet.update("A1:F1", [LOG_HEADERS])
-                    sheet_repo.invalidate_cache(LOG_SHEET)
-                _LOG_HEADERS_READY = True
-        sheet_repo.append_row(LOG_SHEET, [
+        # Optimasi Log: Reduksi pesan untuk status non-kritis
+        full_log_statuses = getattr(config, "LOG_FULL_MESSAGE_STATUSES", {"ERROR", "PENDING_CONFIRM", "CONFIRMED"})
+        msg_str = str(message or "")
+        if status not in full_log_statuses:
+            msg_hash = hashlib.md5(msg_str.encode()).hexdigest()[:8]
+            msg_str = f"{msg_str[:50]}... [hash:{msg_hash}]"
+        else:
+            msg_str = msg_str[:500]
+
+        from app.core.metrics import track_log
+        track_log(status.lower())
+
+        row = [
             now_tz().strftime("%Y-%m-%d %H:%M:%S"), str(sender or ""),
-            str(message or "")[:500], str(status or ""), str(invoice or ""), str(error or ""),
-        ])
+            msg_str, str(status or ""), str(invoice or ""), str(error or ""),
+        ]
+        
+        with _STATE_LOCK:
+            _LOG_BUFFER.append(row)
+            # Flush if buffer >= 10 or 30 seconds passed
+            if len(_LOG_BUFFER) >= 10 or (datetime.now() - _LAST_FLUSH).total_seconds() >= 30:
+                flush_logs()
+                
     except Exception as exception:
-        print(f"Webhook log error: {exception}")
+        logger.error(f"Webhook log error: {exception}")

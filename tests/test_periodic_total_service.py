@@ -6,9 +6,10 @@ from app.services.periodic_total_service import (
 )
 
 def test_is_subtotal_row():
-    assert is_subtotal_row(["", "", "SUBTOTAL MINGGU 1 (01-07 Jan 2026)"]) is True
-    assert is_subtotal_row(["", "", "TOTAL BULAN Januari 2026"]) is True
-    assert is_subtotal_row(["", "", "Jual Telur"]) is False
+    # idx 2 is Keterangan
+    assert is_subtotal_row(["2026-01-01", "", "SUBTOTAL MINGGU 1 (01-07 Jan 2026)"]) is True
+    assert is_subtotal_row(["2026-01-31", "", "TOTAL BULAN Januari 2026"]) is True
+    assert is_subtotal_row(["2026-01-01", "Telur", "Jual Telur"]) is False
     assert is_subtotal_row([]) is False
 
 @patch("app.repositories.sheet_repo.get_sheet")

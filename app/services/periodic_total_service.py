@@ -280,10 +280,10 @@ def write_period_total(sheet_name: str, period: Period) -> PeriodTotal:
                     last_row_idx = idx + 1
         
         # Build row
-        # [Nomor="", Tanggal=period.end_date, Nama Barang="", Keterangan=period.label, Kuantitas="", Satuan="", Pemasukan, Pengeluaran, Saldo]
+        # [Tanggal, Produk, Keterangan, Kuantitas, Satuan, Pemasukan, Pengeluaran, Saldo, TxID]
         new_row = [
-            "", period.end_date.strftime("%Y-%m-%d"), "", period.label,
-            "", "", total.pemasukan, total.pengeluaran, total.sisa_saldo_akhir
+            period.end_date.strftime("%Y-%m-%d"), "", period.label,
+            "", "", total.pemasukan, total.pengeluaran, total.sisa_saldo_akhir, ""
         ]
         
         sheet_repo.insert_rows_after(sheet_name, last_row_idx, [new_row])
@@ -344,8 +344,8 @@ def write_monthly_total(sheet_name: str, year: int, month: int) -> PeriodTotal:
                     insert_after = idx + 1
                     
         new_row = [
-            "", monthly_period.end_date.strftime("%Y-%m-%d"), "", monthly_period.label,
-            "", "", total.pemasukan, total.pengeluaran, total.sisa_saldo_akhir
+            monthly_period.end_date.strftime("%Y-%m-%d"), "", monthly_period.label,
+            "", "", total.pemasukan, total.pengeluaran, total.sisa_saldo_akhir, ""
         ]
         
         sheet_repo.insert_rows_after(sheet_name, insert_after, [new_row])

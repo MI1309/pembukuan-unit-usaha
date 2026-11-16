@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 from threading import RLock
 
@@ -104,17 +105,31 @@ def _timestamp(value) -> datetime | None:
     return None
 
 
-def prune_logs(days: int = 90) -> int:
+def prune_logs(days: int | None = None) -> int:
+    retention = days if days is not None else int(getattr(config, "LOG_RETENTION_DAYS", 30))
     records = sheet_repo.get_all_records("_Logs")
-    cutoff = now_tz() - timedelta(days=days)
+    cutoff = now_tz() - timedelta(days=retention)
     obsolete = []
     for row_number, record in enumerate(records, start=2):
         timestamp = _timestamp(record.get("Timestamp"))
         if timestamp and timestamp < cutoff:
             obsolete.append(row_number)
-    for row_number in reversed(obsolete):
-        sheet_repo.delete_row("_Logs", row_number)
+            
+    if obsolete:
+        # Optimasi: Hapus secara batch dari bawah ke atas
+        sheet_repo.delete_rows_bottom_up("_Logs", obsolete)
+        
     return len(obsolete)
+
+
+def report_daily_metrics() -> None:
+    """Simpan metrik harian ke _Meta."""
+    from app.core.metrics import metrics
+    today = now_tz().strftime("%Y-%m-%d")
+    meta_key = f"metrics:{today}"
+    report = metrics.report_json()
+    sheet_repo._write_archive_manifest(meta_key, json.loads(report))
+    metrics.reset()
 
 
 def cleanup_pending_confirmations() -> int:
@@ -173,8 +188,14 @@ def daily_backup() -> dict:
         folder_id = _get_or_create_folder()
         copied = create_backup_copy(folder_id)
         deleted = _prune_old_backups(folder_id)
-        logs_pruned = prune_logs(90)
+        
+        # Optimasi: Retensi 30 hari default
+        logs_pruned = prune_logs()
         pending_pruned = cleanup_pending_confirmations()
+        
+        # Laporkan metrik harian
+        report_daily_metrics()
+        
         detail = f"log_pruned={logs_pruned};pending_pruned={pending_pruned};backups_pruned={deleted}"
         log_event("SYSTEM", "dailyBackup", "BACKUP_OK", copied["name"], detail)
         return {"status": "success", "name": copied["name"], "deleted": deleted}

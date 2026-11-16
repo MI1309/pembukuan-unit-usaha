@@ -573,6 +573,29 @@ def append_rows_atomically(
             })
 
         if daily_detail_row_count is not None and rows:
+            header_row_index = _detect_header_row_index(sheet_name, worksheet.get_all_values())
+            requests.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": worksheet.id,
+                        "startRowIndex": header_row_index,
+                        "endRowIndex": header_row_index + 1,
+                        "startColumnIndex": 7,
+                        "endColumnIndex": 8,
+                    },
+                    "cell": {"userEnteredFormat": {
+                        "backgroundColor": {"red": 0.12, "green": 0.22, "blue": 0.39},
+                        "textFormat": {
+                            "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                            "bold": True,
+                        },
+                        "horizontalAlignment": "CENTER",
+                        "verticalAlignment": "MIDDLE",
+                        "wrapStrategy": "WRAP",
+                    }},
+                    "fields": "userEnteredFormat",
+                }
+            })
             appended_end_row = daily_detail_row_count + len(rows)
             requests.extend([
                 {
@@ -650,7 +673,10 @@ def append_rows_atomically(
             "Refreshing stale worksheet grid after append failure sheets=%s",
             list(rows_by_name),
         )
-        return append_rows_atomically(rows_by_sheet, _refreshed_stale_grid=True)
+        try:
+            return append_rows_atomically(rows_by_sheet, _refreshed_stale_grid=True)
+        except Exception:
+            raise error
 
     # Daily detail is kept chronological; unit ledgers are sorted by recap.
     for sheet_name in rows_by_name:
@@ -922,14 +948,18 @@ def _records_from_values(values: list[list], skip_subtotals: bool = False) -> li
         headers.append(header)
         used_headers.add(header)
 
+    description_index = next((
+        index for index, header in enumerate(headers)
+        if _normalize_header_label(header) in {"keterangan", "keterangan transaksi"}
+    ), 2)
+
     records = []
     for row in values[header_row + 1:]:
         if not any(str(value).strip() for value in row):
             continue
-        # Skip subtotal rows if requested
-        if skip_subtotals and len(row) > 3:
-            keterangan = str(row[3]).strip().upper()
-            if keterangan.startswith("SUBTOTAL MINGGU") or keterangan.startswith("TOTAL BULAN"):
+        if skip_subtotals and description_index < len(row):
+            keterangan = str(row[description_index]).strip().upper().lstrip("[")
+            if keterangan.startswith(("SUBTOTAL MINGGU", "TOTAL BULAN")):
                 continue
 
         records.append({
@@ -1516,7 +1546,7 @@ def format_total_row(sheet_name: str, row_index: int) -> None:
         if label.startswith("TOTAL BULAN")
         else {"red": 1.0, "green": 0.94, "blue": 0.72}
     )
-    label_column_index = 4 if sheet_name == "(2)Rincian Transaksi Harian" else 2
+    label_column_index = 2
     requests = [
         {
             "repeatCell": {
@@ -1585,6 +1615,18 @@ def format_total_row(sheet_name: str, row_index: int) -> None:
                 "fields": "userEnteredFormat.horizontalAlignment,userEnteredFormat.numberFormat",
             }
         })
+    requests.append({
+        "updateDimensionProperties": {
+            "range": {
+                "sheetId": worksheet.id,
+                "dimension": "COLUMNS",
+                "startIndex": label_column_index,
+                "endIndex": label_column_index + 1,
+            },
+            "properties": {"pixelSize": 360},
+            "fields": "pixelSize",
+        }
+    })
     _retry_google_call(worksheet.spreadsheet.batch_update, {"requests": requests})
     invalidate_cache(sheet_name)
 
@@ -1594,23 +1636,61 @@ def rewrite_period_block(sheet_name: str, start_row: int, end_row: int, new_rows
     """Ganti blok [start_row, end_row] dengan new_rows via
     spreadsheets.batchUpdate (atomik). Invalidasi cache.
     start_row dan end_row adalah 1-based index."""
-    worksheet = get_sheet(sheet_name)
-    if not worksheet:
-        raise ValueError(f"Worksheet not found: {sheet_name}")
-
     if not new_rows:
         return
-
-    # Hitung lebar kolom maksimum untuk padding
-    width = max(len(row) for row in new_rows)
-    end_col = _column_name(width)
-    range_name = f"A{start_row}:{end_col}{end_row}"
-
-    # Pastikan jumlah baris baru sama dengan jumlah baris yang diganti
     if len(new_rows) != (end_row - start_row + 1):
         raise ValueError(f"Mismatch row count: new={len(new_rows)} vs range={end_row-start_row+1}")
 
-    worksheet.update(range_name=range_name, values=new_rows)
+    width = max(len(row) for row in new_rows)
+    spreadsheet = get_spreadsheet()
+
+    def write_block(worksheet):
+        if not worksheet:
+            raise ValueError(f"Worksheet not found: {sheet_name}")
+        rows = []
+        for row in new_rows:
+            cells = []
+            for value in row + [""] * (width - len(row)):
+                if isinstance(value, bool):
+                    entered_value = {"boolValue": value}
+                elif isinstance(value, (int, float)):
+                    entered_value = {"numberValue": value}
+                else:
+                    entered_value = {"stringValue": str(value or "")}
+                cells.append({"userEnteredValue": entered_value})
+            rows.append({"values": cells})
+        body = {"requests": [{
+            "updateCells": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": start_row - 1,
+                    "endRowIndex": end_row,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": width,
+                },
+                "rows": rows,
+                "fields": "userEnteredValue",
+            }
+        }]}
+        return _retry_google_call(spreadsheet.batch_update, body)
+
+    worksheet = get_sheet(sheet_name)
+    if not worksheet:
+        raise ValueError(f"Worksheet not found: {sheet_name}")
+    try:
+        write_block(worksheet)
+    except Exception as original_error:
+        if "no grid with id" not in str(original_error).casefold():
+            raise
+        _evict_sheet_cache(sheet_name)
+        logger.warning("Refreshing stale worksheet grid after block rewrite sheet=%s", sheet_name)
+        refreshed = get_sheet(sheet_name, create=False)
+        if not refreshed:
+            raise original_error
+        try:
+            write_block(refreshed)
+        except Exception:
+            raise original_error
     invalidate_cache(sheet_name)
 
 

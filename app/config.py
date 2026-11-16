@@ -78,6 +78,9 @@ class Config:
         "(6)Perikanan ",
         "(7)Pabrik Pupuk",
     ]
+    @property
+    def LEDGER_UNITS(self) -> list[str]:
+        return self.UNIT_USAHA
 
     # Rekap Otomatis
     RECAP_ENABLED = True

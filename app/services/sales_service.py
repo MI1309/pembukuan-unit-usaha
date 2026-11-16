@@ -27,6 +27,15 @@ def generate_transaction_id(sender, tanggal, produk, kuantitas, nominal, keteran
     return _generate_transaction_id(sender, tanggal, produk, kuantitas, nominal, keterangan, unit)
 
 
+def _log_backdated_transaction(transaction_date: date) -> None:
+    if transaction_date < now_tz().date():
+        period = periodic_total_service.get_period_for_date(transaction_date)
+        logger.info(
+            "backdated transaction into period %s, manual recap recommended",
+            period.label,
+        )
+
+
 def get_unit_sheet(produk_nama: str) -> str:
     product = produk_nama.lower()
     if "emran" in product:
@@ -119,6 +128,7 @@ def _normalise_sale(raw: dict, message: str = "") -> tuple[dict | None, str | No
     current_time = now_tz()
     today = current_time.date()
     sale_date = _parse_date(raw.get("tanggal")) or today
+    _log_backdated_transaction(sale_date)
     description = str(raw.get("keterangan") or "").strip()
     if not unit_price and quantity:
         unit_price = round(total / quantity)
@@ -748,13 +758,21 @@ def _process_recap_period(year: int, month: int, kind: str, label: str) -> None:
 def _refresh_current_period_totals(now: datetime, trigger_source: str) -> None:
     if not getattr(config, "RECAP_ENABLED", True):
         return
-    current_period = periodic_total_service.get_period_for_date(now.date())
-    _process_recap_period(
-        now.year, now.month, "week", current_period.label,
-    )
-    monthly_period = periodic_total_service.get_period_boundaries(now.year, now.month)[-1]
-    _process_recap_period(now.year, now.month, "month", monthly_period.label)
+    periods = periodic_total_service.get_period_boundaries(now.year, now.month)
+    closed_weeks = [
+        period for period in periods
+        if period.kind == "week" and period.end_date == now.date()
+    ]
+    month_period = periods[-1]
+    if not closed_weeks and month_period.end_date != now.date():
+        return
+    for period in closed_weeks:
+        _process_recap_period(now.year, now.month, "week", period.label)
+    if month_period.end_date == now.date():
+        _process_recap_period(now.year, now.month, "month", month_period.label)
     logger.info(
-        "running totals refreshed by %s for %s and %s",
-        trigger_source, current_period.label, monthly_period.label,
+        "closed-period totals refreshed by %s for %s",
+        trigger_source, ", ".join(period.label for period in closed_weeks + (
+            [month_period] if month_period.end_date == now.date() else []
+        )),
     )

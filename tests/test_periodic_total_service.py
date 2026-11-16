@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import MagicMock, patch
-from datetime import date
+from datetime import date, datetime, timedelta
 from app.services.periodic_total_service import (
     Period, PeriodTotal, compute_period_total, ensure_sorted,
     write_period_total, write_monthly_total, is_subtotal_row,
@@ -10,8 +10,10 @@ from app.core.utils import parse_amount, parse_date
 def test_is_subtotal_row():
     # idx 2 is Keterangan
     assert is_subtotal_row(["2026-01-01", "", "SUBTOTAL MINGGU 1 (01-07 Jan 2026)"]) is True
+    assert is_subtotal_row(["2026-01-01", "", "[SUBTOTAL MINGGU 1 (01-07 Jan 2026)"]) is True
     assert is_subtotal_row(["2026-01-31", "", "TOTAL BULAN Januari 2026"]) is True
     assert is_subtotal_row(["2026-01-01", "Telur", "Jual Telur"]) is False
+    assert is_subtotal_row(["", "", "[SUBTOTAL MINGGU 1]"]) is True
     assert is_subtotal_row([]) is False
 
 
@@ -88,13 +90,38 @@ def test_weekly_subtotal_is_inserted_after_max_date_when_period_is_complete(
     period = Period("SUBTOTAL MINGGU 1 (01-07 Oktober 2026)", date(2026, 10, 1), date(2026, 10, 7), "week")
     mock_compute.return_value = PeriodTotal(period, 300, 0, 300)
 
-    write_period_total("(3)Pertanian ", period)
+    write_period_total("Unit", period)
 
     mock_insert.assert_called_once()
     sheet_name, after_row, inserted_rows = mock_insert.call_args.args
-    assert sheet_name == "(3)Pertanian "
+    assert sheet_name == "Unit"
     assert after_row == 4
     assert inserted_rows[0] == ["2026-10-07", "", period.label, "", "", 300, 0, 300, ""]
+
+
+@patch("app.repositories.sheet_repo.delete_rows_bottom_up")
+@patch("app.repositories.sheet_repo.insert_rows_after")
+@patch("app.services.periodic_total_service.compute_period_total")
+@patch("app.repositories.sheet_repo.get_sheet")
+@patch("app.services.periodic_total_service.ensure_sorted")
+def test_weekly_subtotal_replaces_existing_label(
+    mock_sorted, mock_get_sheet, mock_compute, mock_insert, mock_delete,
+):
+    worksheet = MagicMock()
+    mock_get_sheet.return_value = worksheet
+    period = Period("SUBTOTAL MINGGU 1 (01-07 Oktober 2026)", date(2026, 10, 1), date(2026, 10, 7), "week")
+    worksheet.get_all_values.return_value = [
+        ["Tanggal", "Produk", "Keterangan", "Qty", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Sisa Saldo", "Transaction ID"],
+        ["2026-10-07", "Produk", "", "1", "unit", "500", "0", "500", "TX1"],
+        ["2026-10-07", "", period.label, "", "", "300", "0", "300", ""],
+    ]
+    mock_compute.return_value = PeriodTotal(period, 500, 0, 500)
+
+    write_period_total("Unit", period)
+
+    mock_delete.assert_called_once_with("Unit", [3])
+    mock_insert.assert_called_once()
+    assert mock_insert.call_args.args[2][0][5:8] == [500, 0, 500]
 
 @patch("app.repositories.sheet_repo.insert_rows_after")
 @patch("app.services.periodic_total_service.compute_period_total")
@@ -122,8 +149,87 @@ def test_monthly_total_is_inserted_after_week_four_subtotal(
 
     _, after_row, inserted_rows = mock_insert.call_args.args
     assert after_row == 3
-    assert inserted_rows[0] == [""] * 9
-    assert inserted_rows[1] == ["2026-10-31", "", monthly.label, "", "", 500, 0, 500, ""]
+    assert inserted_rows == [["2026-10-31", "", monthly.label, "", "", 500, 0, 500, ""]]
+
+
+@patch("app.repositories.sheet_repo.delete_rows_bottom_up")
+@patch("app.repositories.sheet_repo.insert_rows_after")
+@patch("app.services.periodic_total_service.compute_period_total")
+@patch("app.repositories.sheet_repo.get_sheet")
+@patch("app.services.periodic_total_service.ensure_sorted")
+def test_monthly_total_replaces_existing_label(
+    mock_sorted, mock_get_sheet, mock_compute, mock_insert, mock_delete,
+):
+    from app.services.periodic_total_service import get_period_boundaries
+
+    worksheet = MagicMock()
+    mock_get_sheet.return_value = worksheet
+    monthly = get_period_boundaries(2026, 10)[4]
+    worksheet.get_all_values.return_value = [
+        ["Tanggal", "Produk", "Keterangan", "Qty", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Sisa Saldo", "Transaction ID"],
+        ["2026-10-31", "Produk", "", "1", "unit", "500", "0", "500", "TX1"],
+        ["2026-10-31", "", monthly.label, "", "", "300", "0", "300", ""],
+    ]
+    mock_compute.return_value = PeriodTotal(monthly, 500, 0, 500)
+
+    write_monthly_total("Unit", 2026, 10)
+
+    mock_delete.assert_called_once_with("Unit", [3])
+    mock_insert.assert_called_once()
+    assert mock_insert.call_args.args[2][0][5:8] == [500, 0, 500]
+
+
+@patch("app.repositories.sheet_repo.insert_rows_after")
+@patch("app.services.periodic_total_service.compute_period_total")
+@patch("app.repositories.sheet_repo.get_sheet")
+@patch("app.services.periodic_total_service.ensure_sorted")
+def test_monthly_total_falls_back_to_last_transaction_without_week_four_total(
+    mock_sorted, mock_get_sheet, mock_compute, mock_insert,
+):
+    from app.services.periodic_total_service import get_period_boundaries
+
+    worksheet = MagicMock()
+    mock_get_sheet.return_value = worksheet
+    monthly = get_period_boundaries(2026, 10)[4]
+    worksheet.get_all_values.return_value = [
+        ["Tanggal", "Produk", "Keterangan", "Qty", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Sisa Saldo", "Transaction ID"],
+        ["2026-10-31", "Produk", "", "1", "unit", "500", "0", "500", "TX1"],
+        ["2026-10-25", "", "SUBTOTAL MINGGU 3 (15-21 Oktober 2026)", "", "", "0", "0", "0", ""],
+    ]
+    mock_compute.return_value = PeriodTotal(monthly, 500, 0, 500)
+
+    write_monthly_total("(3)Pertanian ", 2026, 10)
+
+    _, after_row, inserted_rows = mock_insert.call_args.args
+    assert after_row == 2
+    assert inserted_rows == [["2026-10-31", "", monthly.label, "", "", 500, 0, 500, ""]]
+
+
+@patch("app.repositories.sheet_repo.insert_rows_after")
+@patch("app.services.periodic_total_service.compute_period_total")
+@patch("app.repositories.sheet_repo.get_sheet")
+@patch("app.services.periodic_total_service.ensure_sorted")
+def test_daily_monthly_total_has_blank_separator_after_week_four_total(
+    mock_sorted, mock_get_sheet, mock_compute, mock_insert,
+):
+    from app.services.periodic_total_service import get_period_boundaries
+
+    worksheet = MagicMock()
+    mock_get_sheet.return_value = worksheet
+    week4, monthly = get_period_boundaries(2026, 10)[3:]
+    worksheet.get_all_values.return_value = [
+        ["Industri Pertanian Terpadu Lentera Farm"], [], ["Periode: Oktober 2026"], [],
+        ["Tanggal", "Nama Produk", "Keterangan Transaksi", "Kuantitas", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Transaction ID"],
+        ["2026-10-31", "Produk", "", "1", "unit", "500", "0", "TX1"],
+        ["", "", "", "", week4.label, 500, 0, ""],
+    ]
+    mock_compute.return_value = PeriodTotal(monthly, 500, 0, 0)
+
+    write_monthly_total("(2)Rincian Transaksi Harian", 2026, 10)
+
+    _, after_row, inserted_rows = mock_insert.call_args.args
+    assert after_row == 7
+    assert inserted_rows == [["", "", monthly.label, "", "", 500, 0, ""]]
 
 @patch("app.repositories.sheet_repo.get_sheet")
 def test_daily_detail_total_respects_header_row_five(mock_get_sheet):
@@ -168,7 +274,7 @@ def test_daily_subtotal_is_inserted_after_last_data_row(
     _, after_row, inserted_rows = mock_insert.call_args.args
     assert after_row == 8
     assert len(inserted_rows[0]) == 8
-    assert inserted_rows[0][4] == period.label
+    assert inserted_rows[0][2] == period.label
     assert inserted_rows[0][5:7] == [1200, 0]
     assert inserted_rows[0][7] == ""
 
@@ -204,7 +310,10 @@ def test_insert_rows_after_colors_weekly_and_monthly_totals_differently(mock_get
 
     batch_calls = worksheet.spreadsheet.batch_update.call_args_list
     requests = [call.args[0]["requests"] for call in batch_calls]
-    formats = [[request["repeatCell"] for request in batch] for batch in requests]
+    formats = [
+        [request["repeatCell"] for request in batch if "repeatCell" in request]
+        for batch in requests
+    ]
     colors = [formats[index][0]["cell"]["userEnteredFormat"]["backgroundColor"] for index in (0, 1)]
     assert colors == [
         {"red": 1.0, "green": 0.94, "blue": 0.72},
@@ -225,18 +334,18 @@ def test_daily_total_style_is_limited_to_label_and_amount_columns(mock_get_sheet
 
     worksheet = MagicMock()
     worksheet.id = 42
-    worksheet.row_values.return_value = ["", "", "", "", "SUBTOTAL MINGGU 1", 1200, 0, ""]
+    worksheet.row_values.return_value = ["", "", "SUBTOTAL MINGGU 1", "", "", 1200, 0, ""]
     mock_get_sheet.return_value = worksheet
 
     insert_rows_after(
         "(2)Rincian Transaksi Harian", 10,
-        [["", "", "", "", "SUBTOTAL MINGGU 1", 1200, 0, ""]],
+        [["", "", "SUBTOTAL MINGGU 1", "", "", 1200, 0, ""]],
     )
 
     requests = worksheet.spreadsheet.batch_update.call_args.args[0]["requests"]
-    formats = [request["repeatCell"] for request in requests]
+    formats = [request["repeatCell"] for request in requests if "repeatCell" in request]
     assert formats[0]["range"]["endColumnIndex"] == 8
-    assert formats[1]["range"]["startColumnIndex"] == 4
+    assert formats[1]["range"]["startColumnIndex"] == 2
     assert formats[1]["cell"]["userEnteredFormat"] == {
         "horizontalAlignment": "LEFT", "wrapStrategy": "CLIP",
     }
@@ -246,6 +355,10 @@ def test_daily_total_style_is_limited_to_label_and_amount_columns(mock_get_sheet
         "type": "CURRENCY", "pattern": '"Rp" #,##0',
     }
     assert len(formats) == 3
+    width_request = requests[-1]["updateDimensionProperties"]
+    assert width_request["range"]["dimension"] == "COLUMNS"
+    assert width_request["range"]["startIndex"] == 2
+    assert width_request["properties"]["pixelSize"] == 360
 
 @patch("app.repositories.sheet_repo.insert_rows_after")
 @patch("app.services.periodic_total_service.compute_period_total")
@@ -294,12 +407,16 @@ def test_week_three_and_four_wait_for_their_end_dates(
     worksheet.get_all_values.return_value = [header, transaction]
     mock_compute.return_value = PeriodTotal(period, 500, 0, 500)
 
-    write_period_total("Unit", period)
-    mock_insert.assert_not_called()
+    with patch("app.services.periodic_total_service.now_tz", side_effect=[
+        datetime.combine(period.end_date - timedelta(days=1), datetime.min.time()),
+        datetime.combine(period.end_date, datetime.min.time()),
+    ]):
+        write_period_total("Unit", period)
+        mock_insert.assert_not_called()
 
-    transaction[0] = period.end_date.isoformat()
-    worksheet.get_all_values.return_value = [header, transaction]
-    write_period_total("Unit", period)
+        transaction[0] = before_end.isoformat()
+        worksheet.get_all_values.return_value = [header, transaction]
+        write_period_total("Unit", period)
 
     mock_insert.assert_called_once()
     _, after_row, inserted_rows = mock_insert.call_args.args
@@ -311,7 +428,72 @@ def test_week_three_and_four_wait_for_their_end_dates(
 @patch("app.services.periodic_total_service.compute_period_total")
 @patch("app.repositories.sheet_repo.get_sheet")
 @patch("app.services.periodic_total_service.ensure_sorted")
-def test_force_weekly_subtotal_uses_max_transaction_date(
+def test_empty_week_writes_zero_at_boundary_when_ledger_has_other_transactions(
+    mock_sorted, mock_get_sheet, mock_compute, mock_insert,
+):
+    from app.services.periodic_total_service import get_period_boundaries
+
+    worksheet = MagicMock()
+    mock_get_sheet.return_value = worksheet
+    period = get_period_boundaries(2026, 10)[0]
+    worksheet.get_all_values.return_value = [
+        ["Tanggal", "Produk", "Keterangan", "Qty", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Sisa Saldo", "Transaction ID"],
+        ["2026-10-08", "Produk minggu 2", "", "1", "unit", "500", "0", "500", "TX1"],
+    ]
+    mock_compute.return_value = PeriodTotal(period, 0, 0, 0)
+
+    write_period_total("Unit", period)
+
+    _, after_row, inserted_rows = mock_insert.call_args.args
+    assert after_row == 1
+    assert inserted_rows[0] == ["2026-10-07", "", period.label, "", "", 0, 0, 0, ""]
+
+
+@patch("app.repositories.sheet_repo.insert_rows_after")
+@patch("app.services.periodic_total_service.compute_period_total")
+@patch("app.repositories.sheet_repo.get_sheet")
+@patch("app.services.periodic_total_service.ensure_sorted")
+def test_empty_ledger_gets_only_monthly_zero_total_at_month_end(
+    mock_sorted, mock_get_sheet, mock_compute, mock_insert,
+):
+    from app.services.periodic_total_service import get_period_boundaries
+
+    worksheet = MagicMock()
+    mock_get_sheet.return_value = worksheet
+    monthly = get_period_boundaries(2026, 10)[4]
+    worksheet.get_all_values.return_value = [[
+        "Tanggal", "Nama Barang/Jasa /Produk", "Keterangan Transaksi", "Kuantitas",
+        "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Sisa Saldo", "Transaction ID",
+    ]]
+    mock_compute.return_value = PeriodTotal(monthly, 0, 0, 0)
+
+    with patch("app.services.periodic_total_service.now_tz", return_value=datetime(2026, 10, 31, 23, 59)):
+        write_period_total("Unit", get_period_boundaries(2026, 10)[0])
+        mock_insert.assert_not_called()
+        write_monthly_total("Unit", 2026, 10)
+
+    _, after_row, inserted_rows = mock_insert.call_args.args
+    assert after_row == 1
+    assert inserted_rows[0][2] == monthly.label
+    assert inserted_rows[0][5:8] == [0, 0, 0]
+
+
+@patch("app.repositories.sheet_repo.insert_rows_after")
+@patch("app.repositories.sheet_repo.get_sheet", return_value=None)
+def test_monthly_total_does_not_create_missing_worksheet(mock_get_sheet, mock_insert):
+    with patch("app.services.periodic_total_service.now_tz", return_value=datetime(2026, 10, 31, 23, 59)):
+        total = write_monthly_total("Missing", 2026, 10)
+
+    assert (total.pemasukan, total.pengeluaran, total.sisa_saldo_akhir) == (0, 0, 0)
+    mock_get_sheet.assert_any_call("Missing", create=False)
+    mock_insert.assert_not_called()
+
+
+@patch("app.repositories.sheet_repo.insert_rows_after")
+@patch("app.services.periodic_total_service.compute_period_total")
+@patch("app.repositories.sheet_repo.get_sheet")
+@patch("app.services.periodic_total_service.ensure_sorted")
+def test_force_does_not_write_weekly_subtotal_before_period_end(
     mock_sorted, mock_get_sheet, mock_compute, mock_insert,
 ):
     from app.services.periodic_total_service import get_period_boundaries
@@ -327,9 +509,56 @@ def test_force_weekly_subtotal_uses_max_transaction_date(
 
     write_period_total("Unit", period, force=True)
 
-    _, after_row, inserted_rows = mock_insert.call_args.args
-    assert after_row == 2
-    assert inserted_rows[0][2] == period.label
+    mock_insert.assert_not_called()
+
+
+@patch("app.repositories.sheet_repo.insert_rows_after")
+@patch("app.services.periodic_total_service.compute_period_total")
+@patch("app.repositories.sheet_repo.get_sheet")
+@patch("app.services.periodic_total_service.ensure_sorted")
+def test_force_does_not_write_monthly_total_before_month_end(
+    mock_sorted, mock_get_sheet, mock_compute, mock_insert,
+):
+    from app.services.periodic_total_service import get_period_boundaries
+
+    worksheet = MagicMock()
+    mock_get_sheet.return_value = worksheet
+    monthly = get_period_boundaries(2026, 11)[4]
+    worksheet.get_all_values.return_value = [
+        ["Tanggal", "Produk", "Keterangan", "Qty", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Sisa Saldo", "Transaction ID"],
+        ["2026-11-16", "Produk", "", "1", "unit", "500", "0", "500", "TX1"],
+    ]
+    mock_compute.return_value = PeriodTotal(monthly, 500, 0, 500)
+
+    write_monthly_total("Unit", 2026, 11, force=True)
+
+    mock_insert.assert_not_called()
+
+
+@patch("app.repositories.sheet_repo.delete_rows_bottom_up")
+@patch("app.repositories.sheet_repo.insert_rows_after")
+@patch("app.services.periodic_total_service.compute_period_total")
+@patch("app.repositories.sheet_repo.get_sheet")
+@patch("app.services.periodic_total_service.ensure_sorted")
+def test_monthly_writer_preserves_existing_partial_total_before_month_end(
+    mock_sorted, mock_get_sheet, mock_compute, mock_insert, mock_delete,
+):
+    from app.services.periodic_total_service import get_period_boundaries
+
+    worksheet = MagicMock()
+    mock_get_sheet.return_value = worksheet
+    monthly = get_period_boundaries(2026, 11)[4]
+    worksheet.get_all_values.return_value = [
+        ["Tanggal", "Produk", "Keterangan", "Qty", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Sisa Saldo", "Transaction ID"],
+        ["2026-11-16", "Produk", "", "1", "unit", "500", "0", "500", "TX1"],
+        ["2026-11-30", "", monthly.label, "", "", "500", "0", "500", ""],
+    ]
+    mock_compute.return_value = PeriodTotal(monthly, 500, 0, 500)
+
+    write_monthly_total("Unit", 2026, 11, force=True)
+
+    mock_delete.assert_not_called()
+    mock_insert.assert_not_called()
 
 @patch("app.repositories.sheet_repo.rewrite_period_block")
 @patch("app.repositories.sheet_repo._detect_header_row_index")
@@ -417,3 +646,25 @@ def test_normalize_sheet_rows_trims_shifted_overflow(mock_get_sheet, mock_rewrit
         ["2026-11-16", "Produk A", "Pembelian", "1", "kg", "500", "0", "500", "20261116-ABC-12345678"],
         ["2026-11-17", "Produk B", "Pembelian", "2", "kg", "600", "0", "600", "20261117-ABC-12345679"],
     ]
+
+
+@patch("app.repositories.sheet_repo.rewrite_period_block")
+@patch("app.repositories.sheet_repo.get_sheet")
+def test_normalize_daily_rows_preserves_transaction_id_in_column_h(mock_get_sheet, mock_rewrite):
+    from app.services.periodic_total_service import normalize_sheet_rows
+
+    worksheet = MagicMock()
+    mock_get_sheet.return_value = worksheet
+    worksheet.get_all_values.return_value = [
+        ["Tanggal", "Nama Produk /Jasa/ Barang", "Keterangan Transaksi", "Kuantitas", "Satuan (Rp)", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Transaction ID"],
+        ["", "20261116", "Produk A", "Pembelian", "1", "kg", "500", "0", "20261116-ABC-12345678"],
+    ]
+
+    changed = normalize_sheet_rows("(2)Rincian Transaksi Harian")
+
+    assert changed == 1
+    rows = mock_rewrite.call_args.args[3]
+    assert rows == [[
+        "2026-11-16", "Produk A", "Pembelian", "1", "kg", "500", "0",
+        "20261116-ABC-12345678",
+    ]]

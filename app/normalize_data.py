@@ -308,6 +308,27 @@ def _rewrite_sheet(plan: dict) -> None:
         "rows": [{"values": [_cell_data(value) for value in plan["headers"]]}],
         "fields": "userEnteredValue",
     }})
+    id_column = column_count - 1
+    requests.append({"repeatCell": {
+        "range": {
+            "sheetId": worksheet.id,
+            "startRowIndex": header_index,
+            "endRowIndex": header_index + 1,
+            "startColumnIndex": id_column,
+            "endColumnIndex": id_column + 1,
+        },
+        "cell": {"userEnteredFormat": {
+            "backgroundColor": {"red": 0.12, "green": 0.22, "blue": 0.39},
+            "textFormat": {
+                "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                "bold": True,
+            },
+            "horizontalAlignment": "CENTER",
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+        }},
+        "fields": "userEnteredFormat",
+    }})
     if plan["rows"]:
         requests.append({"updateCells": {
             "start": {"sheetId": worksheet.id, "rowIndex": header_index + 1, "columnIndex": 0},

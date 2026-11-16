@@ -179,3 +179,34 @@ def test_period_processor_forces_totals_only_for_requested_units():
     assert write_week.call_args.kwargs["force"] is True
     write_month.assert_not_called()
     assert list(results) == ["(3)Pertanian "]
+
+
+def test_period_processor_defaults_to_configured_ledger_units():
+    from app.services import periodic_total_service
+
+    with patch.object(periodic_total_service.config, "UNIT_USAHA", ["Unit A"]), \
+         patch.object(periodic_total_service, "write_period_total") as write_week:
+        results = periodic_total_service.process_all_units_period(
+            2026, 11, period_kind="week", week_index=1,
+        )
+
+    write_week.assert_called_once()
+    assert write_week.call_args.args[0] == "Unit A"
+    assert list(results) == ["Unit A"]
+
+
+def test_period_processor_continues_after_unit_failure():
+    from app.services import periodic_total_service
+
+    success = periodic_total_service.PeriodTotal(
+        periodic_total_service.get_period_boundaries(2026, 11)[0], 0, 0, 0,
+    )
+    with patch.object(periodic_total_service.config, "UNIT_USAHA", ["Unit A", "Unit B"]), \
+         patch.object(periodic_total_service, "write_period_total", side_effect=[RuntimeError("failed"), success]) as write_week:
+        results = periodic_total_service.process_all_units_period(
+            2026, 11, period_kind="week", week_index=1,
+        )
+
+    assert isinstance(results["Unit A"], RuntimeError)
+    assert results["Unit B"] == success
+    assert write_week.call_count == 2

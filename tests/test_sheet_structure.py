@@ -62,6 +62,67 @@ class SheetStructureTests(unittest.TestCase):
             "Keterangan Transaksi": "Penjualan",
         }])
 
+    def test_skip_subtotals_uses_keterangan_header_column(self):
+        values = [
+            ["Kakorlap Unit Usaha Pertanian"],
+            ["Tanggal", "Nama Barang/Jasa /Produk", "Keterangan Transaksi", "Kuantitas", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Sisa Saldo", "Transaction ID"],
+            ["2026-11-01", "Pupuk", "Pembelian", "1", "kg", "0", "100", "-100", "TX1"],
+            ["2026-11-07", "", "[SUBTOTAL MINGGU 1]", "", "", "0", "100", "-100", ""],
+        ]
+
+        records = sheet_repo._records_from_values(values, skip_subtotals=True)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["Nama Barang/Jasa /Produk"], "Pupuk")
+
+    def test_skip_subtotals_uses_daily_description_header(self):
+        values = [
+            ["Industri Pertanian Terpadu Lentera Farm"], [], ["Periode: November 2026"], [],
+            ["Tanggal", "Nama Produk /Jasa/ Barang", "Keterangan Transaksi", "Kuantitas", "Satuan (Rp)", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Transaction ID"],
+            ["2026-11-01", "Telur", "Penjualan", "1", 1500, 1500, 0, "TX1"],
+            ["", "", "[TOTAL BULAN November 2026]", "", "", 1500, 0, ""],
+        ]
+
+        records = sheet_repo._records_from_values(values, skip_subtotals=True)
+
+        assert len(records) == 1
+        assert records[0]["Nama Produk /Jasa/ Barang"] == "Telur"
+
+    def test_rewrite_period_block_refreshes_stale_grid_id_once(self):
+        sheet_name = "(3)Pertanian "
+        stale = unittest.mock.Mock(id=361071210, title=sheet_name)
+        fresh = unittest.mock.Mock(id=987654321, title=sheet_name)
+        spreadsheet = unittest.mock.Mock()
+        spreadsheet.worksheet.return_value = fresh
+        original_error = RuntimeError("APIError: [400]: No grid with id: 361071210")
+        spreadsheet.batch_update.side_effect = [original_error, None]
+        rows = [["2026-11-01", "Produk", "", "1", "kg", 100, 0, 100, "TX1"]]
+
+        with patch.object(sheet_repo, "get_spreadsheet", return_value=spreadsheet), \
+             patch.dict(sheet_repo._worksheet_cache, {sheet_name: stale}), \
+             patch.object(sheet_repo, "invalidate_cache"):
+            sheet_repo.rewrite_period_block(sheet_name, 3, 3, rows)
+
+        assert spreadsheet.batch_update.call_count == 2
+        first = spreadsheet.batch_update.call_args_list[0].args[0]["requests"][0]["updateCells"]["range"]
+        second = spreadsheet.batch_update.call_args_list[1].args[0]["requests"][0]["updateCells"]["range"]
+        assert first["sheetId"] == stale.id
+        assert second["sheetId"] == fresh.id
+
+    def test_rewrite_period_block_reraises_original_stale_grid_error(self):
+        sheet_name = "(3)Pertanian "
+        stale = unittest.mock.Mock(id=361071210, title=sheet_name)
+        fresh = unittest.mock.Mock(id=987654321, title=sheet_name)
+        spreadsheet = unittest.mock.Mock()
+        spreadsheet.worksheet.return_value = fresh
+        original_error = RuntimeError("APIError: [400]: No grid with id: 361071210")
+        spreadsheet.batch_update.side_effect = [original_error, RuntimeError("second failure")]
+
+        with patch.object(sheet_repo, "get_spreadsheet", return_value=spreadsheet), \
+             patch.dict(sheet_repo._worksheet_cache, {sheet_name: stale}):
+            with self.assertRaisesRegex(RuntimeError, "No grid with id: 361071210"):
+                sheet_repo.rewrite_period_block(sheet_name, 3, 3, [["row"]])
+
     def test_get_all_records_many_uses_sheet_ttl(self):
         response = {"Ledger!A:Z": [["Tanggal", "Barang"], ["2026-11-16", "Pakan"]]}
         record_cache = {}
@@ -252,6 +313,13 @@ class SheetStructureTests(unittest.TestCase):
         self.assertEqual(sort_request["range"]["endColumnIndex"], 8)
         self.assertEqual(sort_request["sortSpecs"][0]["dimensionIndex"], 0)
         self.assertEqual(sort_request["sortSpecs"][1]["dimensionIndex"], 7)
+        id_header_format = next(
+            request["repeatCell"] for request in requests
+            if request.get("repeatCell", {}).get("range", {}).get("startColumnIndex") == 7
+        )
+        self.assertEqual(id_header_format["range"]["startRowIndex"], 4)
+        self.assertEqual(id_header_format["range"]["endColumnIndex"], 8)
+        self.assertTrue(id_header_format["cell"]["userEnteredFormat"]["textFormat"]["bold"])
 
     def test_append_refreshes_stale_worksheet_grid_id_once(self):
         sheet_name = "(4)Ternak Ayam Fazza"
@@ -279,6 +347,26 @@ class SheetStructureTests(unittest.TestCase):
         second_requests = spreadsheet.batch_update.call_args_list[1].args[0]["requests"]
         assert first_requests[0]["appendCells"]["sheetId"] == stale.id
         assert second_requests[0]["appendCells"]["sheetId"] == fresh.id
+
+    def test_append_reraises_original_error_when_refreshed_grid_retry_fails(self):
+        sheet_name = "(4)Ternak Ayam Fazza"
+        stale = unittest.mock.Mock(id=361071210, title=sheet_name)
+        fresh = unittest.mock.Mock(id=987654321, title=sheet_name)
+        stale.get_all_values.return_value = [LEDGER_HEADERS]
+        fresh.get_all_values.return_value = [LEDGER_HEADERS]
+        spreadsheet = unittest.mock.Mock()
+        spreadsheet.worksheet.return_value = fresh
+        original_error = RuntimeError("APIError: [400]: No grid with id: 361071210")
+        spreadsheet.batch_update.side_effect = [original_error, RuntimeError("retry failed")]
+        row = ["2026-11-16", "Produk", "", "1", "unit", 100, 0, 100, "20261116-TAF-12345678"]
+
+        with patch.object(sheet_repo, "get_spreadsheet", return_value=spreadsheet), \
+             patch.dict(sheet_repo._worksheet_cache, {sheet_name: stale}), \
+             patch.object(sheet_repo, "_cached_get_all_values", return_value=[LEDGER_HEADERS]), \
+             patch.object(sheet_repo, "_safe_append", side_effect=lambda operation, *_args: operation()), \
+             patch.object(sheet_repo, "invalidate_cache"):
+            with self.assertRaisesRegex(RuntimeError, "No grid with id: 361071210"):
+                sheet_repo.append_rows_atomically([(sheet_name, row)])
 
     def test_find_subtotal_rows_uses_keterangan_header_column(self):
         sheet_name = "(4)Ternak Ayam Fazza"

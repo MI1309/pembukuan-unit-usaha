@@ -1,5 +1,7 @@
 # File-by-File Architecture Document
 
+Dokumentasi operasional terperinci untuk normalisasi, schema harian, dan backfill total tersedia di [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ## Bot WhatsApp Automation PT Lentera Agrinova Organik
 
 Dokumen ini memetakan seluruh **26 file Python** di bawah `app/` berdasarkan kode saat ini. Fungsi yang tidak memiliki anotasi tipe di source ditandai sebagai **tipe inferensi**. Daftar dependensi berfokus pada import langsung; alur runtime tambahan disebutkan pada catatan arsitektur.
@@ -163,8 +165,8 @@ Dokumen ini memetakan seluruh **26 file Python** di bawah `app/` berdasarkan kod
 - `delete_row(sheet_name: str, row: int)`: Menghapus baris worksheet jika tersedia.
 - `get_drive_access_token() -> str`: Meminta access token OAuth Drive melalui `drive_oauth`.
 - `get_sales_data()`: Membaca records dari worksheet legacy `Rincian Penjualan`.
-- `get_all_records_many(sheet_names: list[str]) -> dict[str, list[dict]]`: Membaca dan mengubah values menjadi records untuk satu/beberapa sheet.
-- `get_all_records(sheet_name: str) -> list`: Convenience wrapper untuk membaca records satu sheet.
+- `get_all_records_many(sheet_names: list[str], skip_subtotals: bool = False) -> dict[str, list[dict]]`: Membaca records beberapa sheet; bila diminta, subtotal/total difilter berdasarkan kolom Keterangan header.
+- `get_all_records(sheet_name: str, skip_subtotals: bool = False) -> list`: Convenience wrapper dengan opsi filter subtotal yang sama.
 - `find_transaction_ids(sheet_names: list[str], tx_ids: list[str]) -> dict[str, list[str]]`: Mencari ID hanya pada kolom `Transaction ID` dan mengembalikan worksheet yang memuat tiap ID.
 - `find_subtotal_rows(sheet_name: str, label_prefix: str) -> list[int]`: Mencari index baris subtotal berdasarkan prefix label.
 - `insert_rows_after(sheet_name: str, after_row: int, rows: list[list]) -> None`: Menambah baris setelah index tertentu.
@@ -175,7 +177,7 @@ Dokumen ini memetakan seluruh **26 file Python** di bawah `app/` berdasarkan kod
 - `rollback_archive(manifest_key: str, apply: bool = True) -> dict`: Menghitung atau memulihkan baris ledger yang hilang dari arsip yang lolos verifikasi.
 - `ArchiveVerificationError`: Error arsip dengan atribut `missing_ids` dan `extra_ids`.
 
-**Catatan Arsitektur:** Credential Sheets berasal dari Service Account `credentials.json`; akses Drive backup memakai OAuth terpisah. Client, worksheet cache, lock, dan record cache bersifat global dalam satu proses; cache record memiliki TTL sekitar tiga detik. Append dengan ID memeriksa keberadaan ID sebelum retry; delete memverifikasi ulang baris. Copy arsip dan delete bukan satu transaksi API, tetapi manifest ditulis setelah verifikasi dan sebelum delete agar partial-delete dapat dipulihkan.
+**Catatan Arsitektur:** Credential Sheets berasal dari Service Account `credentials.json`; akses Drive backup memakai OAuth terpisah. Client, worksheet cache, lock, dan record cache bersifat global dalam satu proses; cache record memiliki TTL sekitar tiga detik. Append dan `rewrite_period_block` atomik menangani `No grid with id` dengan membuang cache worksheet dan mencoba ulang sekali memakai ID dinamis. Append dengan ID memeriksa keberadaan ID sebelum retry; delete memverifikasi ulang baris. Copy arsip dan delete bukan satu transaksi API, tetapi manifest ditulis setelah verifikasi dan sebelum delete agar partial-delete dapat dipulihkan.
 
 ## 4. Service Layer
 
@@ -199,7 +201,7 @@ Dokumen ini memetakan seluruh **26 file Python** di bawah `app/` berdasarkan kod
 - `handle_help_command(message: str) -> str | None`: Menghasilkan panduan bot untuk perintah bantuan yang dikenali.
 - `help_copy_messages() -> list[str]`: Mengembalikan contoh pesan transaksi siap salin.
 
-**Catatan Arsitektur:** Service ini melakukan orkestrasi parsing, perhitungan, pengarsipan, dan persistence. ID yang sudah ada menghasilkan respons duplicate dan log `DUPLICATE_SKIPPED`; Transaction ID berbasis konten juga menangani redelivery tanpa event ID. Pemetaan penjualan otomatis hanya mencakup kategori yang ditentukan di kode; pembelian memerlukan unit yang disebut eksplisit. Lock penyimpanan hanya melindungi proses lokal.
+**Catatan Arsitektur:** Service ini melakukan orkestrasi parsing, perhitungan, pengarsipan, dan persistence. ID yang sudah ada menghasilkan respons duplicate dan log `DUPLICATE_SKIPPED`; Transaction ID berbasis konten juga menangani redelivery tanpa event ID. Pembaca rekap memakai `skip_subtotals=True`. Backdate dicatat pada INFO dan tidak otomatis menyortir periode lama. Pemetaan penjualan otomatis hanya mencakup kategori yang ditentukan di kode; pembelian memerlukan unit yang disebut eksplisit. Lock penyimpanan hanya melindungi proses lokal.
 
 ### 📄 `app/services/karyawan_service.py`
 **Peran Utama:** Mengelola profil karyawan, pencocokan nomor dan role, perintah karyawan/admin, presensi, serta statistik kehadiran.
@@ -271,11 +273,11 @@ Dokumen ini memetakan seluruh **26 file Python** di bawah `app/` berdasarkan kod
 - `get_period_boundaries(year, month)`: Menghasilkan 4 minggu + 1 bulan sebagai objek Period.
 - `compute_period_total(sheet_name, period)`: Menghitung Pemasukan, Pengeluaran, dan Saldo Akhir untuk satu periode.
 - `ensure_sorted(sheet_name, period)`: Memastikan transaksi dalam blok periode terurut berdasarkan Tanggal dan Transaction ID.
-- `write_period_total(sheet_name, period)`: Menulis baris SUBTOTAL MINGGU ke ledger.
-- `write_monthly_total(sheet_name, year, month)`: Menulis baris TOTAL BULAN ke ledger.
-- `process_all_units_period(year, month, period_kind, week_index)`: Menjalankan penulisan total untuk semua unit usaha.
+- `write_period_total(sheet_name, period, force=False)`: Mengganti/menulis SUBTOTAL MINGGU hanya saat boundary WIB tercapai; minggu kosong mendapat subtotal nol bila ledger memiliki transaksi lain.
+- `write_monthly_total(sheet_name, year, month, force=False)`: Mengganti/menulis TOTAL BULAN setelah boundary WIB; ledger kosong mendapat total nol tanpa subtotal mingguan.
+- `process_all_units_period(year, month, period_kind, week_index, force=False, unit_names=None)`: Menjalankan penulisan total pada unit default atau worksheet pilihan.
 
-**Catatan Arsitektur:** Baris subtotal ditandai dengan label khusus di kolom Keterangan. Perhitungan saldo akhir mengambil saldo baris transaksi terakhir dalam periode atau saldo terakhir sebelum periode dimulai jika kosong.
+**Catatan Arsitektur:** Baris subtotal ditandai dengan label khusus di kolom Keterangan. Perhitungan saldo akhir mengambil saldo baris transaksi terakhir dalam periode atau saldo terakhir sebelum periode dimulai jika kosong. Ledger unit memiliki 9 kolom A:I; rincian harian memiliki 8 kolom A:H tanpa Sisa Saldo.
 
 ### 📄 `app/services/rekap_service.py`
 **Peran Utama:** Menyediakan formatter rekap penjualan sederhana.
@@ -361,6 +363,8 @@ Dokumen ini memetakan seluruh **26 file Python** di bawah `app/` berdasarkan kod
 - `router: APIRouter`: Memuat route `POST /webhook`, `GET /webhook`, dan `GET /setup`.
 - `process_webhook_payload(data: dict) -> dict`: Memvalidasi secret, event ID, sender, rate limit, dan menjalankan perintah bisnis sesuai kategori pesan.
 
+**Lazy Trigger:** Setelah validasi/otorisasi dan sebelum dispatch, router memulai daemon thread untuk `_safe_lazy_trigger`; klasifikasi kategori tidak memanggil handler bisnis. Error trigger dicatat sebagai warning dan tidak membatalkan dispatch. Refresh setelah transaksi hanya berlaku saat boundary periode tercapai.
+
 **Catatan Arsitektur:** Handler menerima variasi field payload dari JSON/form/query. Pengirim admin ditentukan service karyawan; nomor karyawan dikenali dari master data. Event dedupe hanya tersedia bila payload memiliki ID. Sebagian pemanggilan pengiriman WhatsApp tidak memeriksa boolean hasil kirim. `GET /setup` menjalankan perubahan spreadsheet dan tidak memiliki pemeriksaan autentikasi tersendiri pada kode router.
 
 ### 📄 `app/routers/report_router.py`
@@ -424,9 +428,9 @@ Dokumen ini memetakan seluruh **26 file Python** di bawah `app/` berdasarkan kod
 **Dependensi (Import):** Standard library `argparse`, `logging`, `sys`, `datetime`; `app.config.config`; `app.core.utils.now_tz`; `app.services.periodic_total_service`.
 
 **Fungsi Publik:**
-- `main()`: Entry point CLI yang menerima parameter `--apply`, `--month`, dan `--all-units`.
+- `main() -> int`: CLI menerima `--apply`, `--month`, dan `--sheet`; default mencakup lima ledger unit, rincian harian dipilih eksplisit.
 
-**Catatan Arsitektur:** Digunakan sebagai recovery tool jika lazy trigger terlewat atau untuk inisialisasi data lama. Bersifat idempoten (mengganti baris subtotal yang sudah ada).
+**Catatan Arsitektur:** Recovery tool jika lazy trigger terlewat atau untuk backfill data lama. Dry-run hanya menghitung. `--apply` menyimpan snapshot nilai lokal; hanya periode yang boundary WIB-nya sudah tercapai yang ditulis. Default mencakup lima ledger; `--sheet` membatasi target dan mendukung rincian harian secara eksplisit. Bersifat idempoten berdasarkan label periode.
 
 ### 📄 `app/verify_archive.py`
 **Peran Utama:** CLI untuk memeriksa ulang manifest arsip atau merencanakan/melakukan restore ke ledger.
@@ -437,3 +441,12 @@ Dokumen ini memetakan seluruh **26 file Python** di bawah `app/` berdasarkan kod
 - `main(argv: list[str] | None = None) -> int`: Menerima `--manifest <key>` untuk verifikasi atau `--restore <key>` untuk dry-run restore; `--apply` mengaktifkan penulisan restore.
 
 **Catatan Arsitektur:** Restore hanya dilakukan dari manifest yang lolos verifikasi dan hanya menambahkan Transaction ID yang belum ada di ledger.
+
+### 📄 `app/normalize_data.py`
+**Peran Utama:** CLI dry-run/apply untuk normalisasi transaksi lama pada lima ledger unit dan rincian harian.
+
+**Schema:** Ledger unit A:I (9 kolom); rincian harian A:H (8 kolom, Transaction ID di H dan tanpa Sisa Saldo).
+
+**Alur apply:** Menyiapkan semua rencana sebelum rewrite; membatalkan batch bila ada baris yang tidak bisa diparse; membuat backup JSON lokal; membuang baris kosong/subtotal lama; menormalkan tanggal, nominal, kolom, dan Transaction ID; menulis header/body lewat batch Google Sheets; lalu meminta rebuild subtotal/total. Writer hanya menulis periode yang boundary WIB-nya sudah tercapai.
+
+**CLI:** `python -m app.normalize_data [--sheet "Nama Sheet"] [--apply]`. Tanpa `--apply`, tidak ada penulisan ke Sheets. Detail prosedur, backup, batasan data, dan command backfill ada di [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

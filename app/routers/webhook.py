@@ -59,6 +59,23 @@ def _start_background_recap(target, source: str) -> None:
         daemon=True,
     ).start()
 
+
+def _message_category(message: str, staff: bool) -> str:
+    if sales_service.handle_help_command(message) is not None or karyawan_service.is_help_command(message, admin=staff):
+        return "help"
+    if re.search(r"\brekap\b", message, re.I):
+        return "recap"
+    if re.search(r"\b(gaji|slip|payroll|bonus|potongan)\b", message, re.I):
+        return "payroll"
+    if re.search(r"\b(karyawan|nik|presensi|hadir|absen|masuk|keluar|izin|sakit|cuti|alpha)\b", message, re.I):
+        return "karyawan"
+    return "transaction"
+
+
+def _trigger_lazy_recap(message: str, staff: bool, source: str | None = None) -> None:
+    if getattr(config, "RECAP_LAZY_TRIGGER_ENABLED", True):
+        _start_background_recap(_safe_lazy_trigger, source or _message_category(message, staff))
+
 # setup
 @router.get("/setup")
 def setup_database():
@@ -139,14 +156,12 @@ def process_webhook_payload(data: dict) -> dict:
             webhook_state.log_event("", message, "INVALID_SENDER", error="sender_not_found")
             return {"status": "error", "message": "Sender tidak ditemukan."}
             
-        if len(message.strip()) < 3 and not re.fullmatch(r"ya|no", message, re.I):
-            return {"status": "ignored", "reason": "empty_or_short"}
-
         # validasi admin/staff
         staff = karyawan_service.is_admin(sender)
         backup_command = re.fullmatch(r"backup(?:\s+sekarang)?", message, re.I)
         if staff and backup_command:
             authorized = True
+            _trigger_lazy_recap(message, staff, "admin")
             # proses perintah backup manual
             result = backup_service.manual_backup()
             if result["status"] == "success":
@@ -176,20 +191,9 @@ def process_webhook_payload(data: dict) -> dict:
             return {"status": "blocked", "error": "sender_not_allowed"}
         authorized = True
 
-        # Lazy trigger for periodic totals
-        if getattr(config, "RECAP_LAZY_TRIGGER_ENABLED", True):
-            # Determine category for logging
-            category = "transaction"
-            if karyawan_service.is_help_command(message, admin=staff):
-                category = "help"
-            elif re.search(r"\brekap\b", message, re.I):
-                category = "recap"
-            elif payroll_service.handle_payroll_command(message, sender) is not None:
-                category = "payroll"
-            elif karyawan_service.handle_karyawan(message, sender) is not None:
-                category = "karyawan"
-
-            _start_background_recap(_safe_lazy_trigger, category)
+        _trigger_lazy_recap(message, staff)
+        if len(message.strip()) < 3 and not re.fullmatch(r"ya|no", message, re.I):
+            return {"status": "ignored", "reason": "empty_or_short"}
 
         employee_reply = karyawan_service.handle_karyawan(message, sender)
         if employee_reply is not None:

@@ -13,12 +13,11 @@ DAILY_DETAIL_SHEET = "(2)Rincian Transaksi Harian"
 def _monthly_total_rows(sheet_name: str, values: list[list], year: int, month: int) -> list[int]:
     month_year = f"{config.BULAN[month - 1]} {year}".casefold()
     columns = totals._resolved_columns(sheet_name, values)
-    description_index = columns["description"] if columns["description"] is not None else 2
     rows = []
     for index, row in enumerate(values):
-        if index <= columns["header"] or description_index >= len(row):
+        if index <= columns["header"]:
             continue
-        label = str(row[description_index]).strip().lstrip("[").casefold()
+        label = totals._subtotal_label(row, columns["description"]).casefold()
         if month_year in label and label.startswith(("subtotal", "total bulan")):
             rows.append(index + 1)
     return rows
@@ -46,8 +45,8 @@ def _process_sheet(sheet_name: str, year: int, month: int, apply: bool) -> dict:
     totals.sort_all_transactions(sheet_name)
     rebuilt_totals = [totals.compute_period_total(sheet_name, period) for period in periods]
     for period in weekly_periods:
-        totals.write_period_total(sheet_name, period)
-    totals.write_monthly_total(sheet_name, year, month)
+        totals.write_period_total(sheet_name, period, force=True)
+    totals.write_monthly_total(sheet_name, year, month, force=True)
     normalized_rows = totals.normalize_row_formatting(sheet_name)
     return {
         "status": "updated",

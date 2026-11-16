@@ -9,6 +9,7 @@ from app.core.utils import format_rupiah, format_tanggal_id, now_tz, parse_amoun
 from app.core.transaction_id import generate_transaction_id as _generate_transaction_id
 from app.repositories import sheet_repo
 from app.core.whatsapp import send_whatsapp
+from app.services import periodic_total_service
 
 _SALES_LOCK = RLock()
 MONTH_ALIASES = {
@@ -310,7 +311,7 @@ def _parse_date(value) -> date | None:
 
 def _transaction_rows() -> list[dict]:
     transactions = []
-    records_by_unit = sheet_repo.get_all_records_many(config.UNIT_USAHA)
+    records_by_unit = sheet_repo.get_all_records_many(config.UNIT_USAHA, skip_subtotals=True)
     for unit, records in records_by_unit.items():
         for row in records:
             sale_date = _parse_date(row.get("Tanggal"))
@@ -543,7 +544,7 @@ def _replace_recap_rows(sheet_name: str, period: str, selected: list[dict]) -> N
             else ["Bulan", "Produk/Jasa/Barang", "Kuantitas", "Satuan", "Total (Rp)", "Jumlah Transaksi"]
         )
         sheet_repo.append_row(sheet_name, headers)
-    records = sheet_repo.get_all_records(sheet_name)
+    records = sheet_repo.get_all_records(sheet_name, skip_subtotals=True)
     matching_rows = [index + 2 for index, row in enumerate(records)
                      if str(row.get("Tanggal", row.get("Bulan", ""))).strip() == period]
     for row_number in reversed(matching_rows):
@@ -644,3 +645,52 @@ def help_copy_messages() -> list[str]:
         "pemb listrik | tagihan November | 1 | bulan | 1200000 | unit Pertanian",
         "rekap bulan ini",
     ]
+
+
+def _lazy_trigger_recap(now: datetime, trigger_source: str) -> None:
+    """Lazy trigger for periodic totals, launched from webhook router."""
+    if not getattr(config, "RECAP_ENABLED", True):
+        return
+
+    try:
+        today = now.date()
+        candidates = [today, today - timedelta(days=1)]
+        processed_labels = []
+
+        for candidate in candidates:
+            # Check if candidate is a boundary
+            year, month = candidate.year, candidate.month
+            boundaries = periodic_total_service.get_period_boundaries(year, month)
+            
+            # Weekly boundaries (7, 14, 21)
+            boundary_days = getattr(config, "RECAP_BOUNDARY_DAYS", [7, 14, 21])
+            
+            # Find if this candidate date is an end_date of any period
+            for period in boundaries:
+                if period.end_date == candidate:
+                    # Check flag in _Meta
+                    meta_key = f"recap_done:{period.label}"
+                    try:
+                        sheet_repo._read_archive_manifest(meta_key)
+                        continue # Already done
+                    except ValueError:
+                        pass # Not done yet
+                    
+                    # Process
+                    if period.kind == "week":
+                        week_idx = int(period.label.split("MINGGU")[1].split("(")[0].strip())
+                        periodic_total_service.process_all_units_period(year, month, period_kind="week", week_index=week_idx)
+                    else:
+                        periodic_total_service.process_all_units_period(year, month, period_kind="month")
+                    
+                    # Set flag
+                    sheet_repo._write_archive_manifest(meta_key, {"done_at": now.isoformat(), "source": trigger_source})
+                    processed_labels.append(period.label)
+
+        if processed_labels:
+            import logging
+            logging.info(f"recap triggered by {trigger_source} for {', '.join(processed_labels)}")
+
+    except Exception as e:
+        import logging
+        logging.warning(f"lazy recap failed: {e}")

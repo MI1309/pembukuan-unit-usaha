@@ -1,9 +1,12 @@
 import re
+import logging
+import threading
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Request, HTTPException
 from app.config import config
 from app.core.whatsapp import send_whatsapp
+from app.core.utils import now_tz
 from app.services import sales_service
 from app.services import karyawan_service, payroll_service
 from app.services import backup_service
@@ -136,6 +139,31 @@ def process_webhook_payload(data: dict) -> dict:
             webhook_state.log_event(sender, message, "RATE_LIMITED", error="too_many_requests")
             send_whatsapp(sender, "⚠️ Terlalu banyak pesan. Coba lagi dalam 1 menit.")
             return {"status": "rate_limited"}
+
+        # Lazy trigger for periodic totals
+        if getattr(config, "RECAP_LAZY_TRIGGER_ENABLED", True):
+            def _safe_lazy_trigger(now, source):
+                try:
+                    sales_service._lazy_trigger_recap(now, source)
+                except Exception as e:
+                    logging.warning("lazy recap failed: %s", e)
+
+            # Determine category for logging
+            category = "transaction"
+            if karyawan_service.is_help_command(message, admin=staff):
+                category = "help"
+            elif re.search(r"\brekap\b", message, re.I):
+                category = "recap"
+            elif payroll_service.handle_payroll_command(message, sender) is not None:
+                category = "payroll"
+            elif karyawan_service.handle_karyawan(message, sender) is not None:
+                category = "karyawan"
+
+            threading.Thread(
+                target=_safe_lazy_trigger,
+                args=(now_tz(), category),
+                daemon=True
+            ).start()
 
         employee_reply = karyawan_service.handle_karyawan(message, sender)
         if employee_reply is not None:

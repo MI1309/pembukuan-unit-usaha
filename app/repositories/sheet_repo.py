@@ -768,7 +768,7 @@ def get_sales_data():
     return _retry_google_call(sheet.get_all_records)
 
 
-def _records_from_values(values: list[list]) -> list[dict]:
+def _records_from_values(values: list[list], skip_subtotals: bool = False) -> list[dict]:
     if not values:
         return []
 
@@ -803,6 +803,12 @@ def _records_from_values(values: list[list]) -> list[dict]:
     for row in values[header_row + 1:]:
         if not any(str(value).strip() for value in row):
             continue
+        # Skip subtotal rows if requested
+        if skip_subtotals and len(row) > 3:
+            keterangan = str(row[3]).strip().upper()
+            if keterangan.startswith("SUBTOTAL MINGGU") or keterangan.startswith("TOTAL BULAN"):
+                continue
+
         records.append({
             header: numericise(row[index], default_blank="") if index < len(row) else ""
             for index, header in enumerate(headers)
@@ -814,12 +820,20 @@ def _a1_column_range(sheet_name: str) -> str:
     return f"{_quote_sheet_name(sheet_name)}!A:Z"
 
 
-def get_all_records_many(sheet_names: list[str]) -> dict[str, list[dict]]:
+def get_all_records_many(sheet_names: list[str], skip_subtotals: bool = False) -> dict[str, list[dict]]:
     with _cache_lock:
         now = monotonic()
         records_by_sheet = {}
         uncached_names = []
         for name in dict.fromkeys(sheet_names):
+            # Cache is only used if skip_subtotals is False to avoid cache pollution
+            # Or we could include skip_subtotals in cache key, but let's keep it simple for now
+            # Actually, the existing cache doesn't support skip_subtotals.
+            # I will skip cache if skip_subtotals is True for now to ensure correctness.
+            if skip_subtotals:
+                uncached_names.append(name)
+                continue
+
             cached = _record_cache.get(name)
             if cached and cached[0] > now:
                 records_by_sheet[name] = cached[1]
@@ -832,8 +846,9 @@ def get_all_records_many(sheet_names: list[str]) -> dict[str, list[dict]]:
             raw = _batch_get_ranges(ranges)
             for name, range_name in zip(uncached_names, ranges):
                 values = raw.get(range_name, [])
-                records = _records_from_values(values)
-                _record_cache[name] = (monotonic() + _READ_CACHE_SECONDS, records)
+                records = _records_from_values(values, skip_subtotals=skip_subtotals)
+                if not skip_subtotals:
+                    _record_cache[name] = (monotonic() + _READ_CACHE_SECONDS, records)
                 records_by_sheet[name] = records
 
         return {
@@ -842,8 +857,8 @@ def get_all_records_many(sheet_names: list[str]) -> dict[str, list[dict]]:
         }
 
 
-def get_all_records(sheet_name: str) -> list:
-    return get_all_records_many([sheet_name])[sheet_name]
+def get_all_records(sheet_name: str, skip_subtotals: bool = False) -> list:
+    return get_all_records_many([sheet_name], skip_subtotals=skip_subtotals)[sheet_name]
 
 
 # ============================================================
@@ -1302,3 +1317,77 @@ def rollback_archive(manifest_key: str, apply: bool = True) -> dict:
         if rows_to_restore:
             append_rows_atomically(rows_to_restore)
     return result
+
+
+@retry_google_api()
+def find_subtotal_rows(sheet_name: str, label_prefix: str) -> list[int]:
+    """Scan get_all_values() sekali, return 1-based row index
+    di mana kolom Keterangan berawalan label_prefix."""
+    worksheet = get_sheet(sheet_name, create=False)
+    if not worksheet:
+        return []
+    values = _cached_get_all_values(worksheet)
+    if not values:
+        return []
+
+    found = []
+    # Kolom Keterangan di ledger unit usaha adalah index 3 (kolom D)
+    for idx, row in enumerate(values):
+        if len(row) > 3:
+            keterangan = str(row[3]).strip().upper()
+            if keterangan.startswith(label_prefix.upper()):
+                found.append(idx + 1)
+    return found
+
+
+@retry_google_api()
+def insert_rows_after(sheet_name: str, after_row: int, rows: list[list]) -> None:
+    """Wrapper worksheet.insert_rows(rows, row=after_row+1)."""
+    worksheet = get_sheet(sheet_name)
+    if not worksheet:
+        raise ValueError(f"Worksheet not found: {sheet_name}")
+    worksheet.insert_rows(rows, row=after_row + 1)
+    invalidate_cache(sheet_name)
+
+
+@retry_google_api()
+def rewrite_period_block(sheet_name: str, start_row: int, end_row: int, new_rows: list[list]) -> None:
+    """Ganti blok [start_row, end_row] dengan new_rows via
+    spreadsheets.batchUpdate (atomik). Invalidasi cache.
+    start_row dan end_row adalah 1-based index."""
+    worksheet = get_sheet(sheet_name)
+    if not worksheet:
+        raise ValueError(f"Worksheet not found: {sheet_name}")
+
+    if not new_rows:
+        return
+
+    # Hitung lebar kolom maksimum untuk padding
+    width = max(len(row) for row in new_rows)
+    end_col = _column_name(width)
+    range_name = f"A{start_row}:{end_col}{end_row}"
+
+    # Pastikan jumlah baris baru sama dengan jumlah baris yang diganti
+    if len(new_rows) != (end_row - start_row + 1):
+        raise ValueError(f"Mismatch row count: new={len(new_rows)} vs range={end_row-start_row+1}")
+
+    worksheet.update(range_name=range_name, values=new_rows)
+    invalidate_cache(sheet_name)
+
+
+@retry_google_api()
+def delete_rows_bottom_up(sheet_name: str, row_indices: list[int]) -> int:
+    """Hapus dari index terbesar ke terkecil. Return jumlah dihapus."""
+    worksheet = get_sheet(sheet_name)
+    if not worksheet or not row_indices:
+        return 0
+
+    sorted_indices = sorted(row_indices, reverse=True)
+    count = 0
+    for idx in sorted_indices:
+        worksheet.delete_rows(idx)
+        count += 1
+
+    if count > 0:
+        invalidate_cache(sheet_name)
+    return count

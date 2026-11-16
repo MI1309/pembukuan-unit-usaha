@@ -79,4 +79,9 @@ class Config:
         "(7)Pabrik Pupuk",
     ]
 
+    # Rekap Otomatis
+    RECAP_ENABLED = True
+    RECAP_LAZY_TRIGGER_ENABLED = True
+    RECAP_BOUNDARY_DAYS = [7, 14, 21]
+
 config = Config()

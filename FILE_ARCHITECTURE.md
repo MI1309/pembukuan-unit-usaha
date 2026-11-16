@@ -27,10 +27,10 @@ Dokumen ini memetakan seluruh **26 file Python** di bawah `app/` berdasarkan kod
 **Dependensi (Import):** Standard library `os`, `pathlib.Path`; package eksternal `dotenv.load_dotenv`.
 
 **Fungsi/Class Publik:**
-- `Config`: Kumpulan atribut konfigurasi integrasi, bisnis, payroll, produk, dan unit.
+- `Config`: Kumpulan atribut konfigurasi integrasi, bisnis, payroll, produk, unit, dan rekap otomatis.
 - `config: Config`: Singleton module-level yang digunakan modul aplikasi.
 
-**Catatan Arsitektur:** `.env` dimuat dari root project. `SPREADSHEET_ID`, token Fonnte/Groq, webhook secret dan ID folder backup berasal dari environment; file credential memakai path default yang dapat dioverride. Banyak nilai bisnis dan keamanan (allowlist, rate limit, threshold, TTL, aturan gaji) masih hard-coded. `_project_path()` adalah helper privat untuk menyelesaikan path relatif ke root.
+**Catatan Arsitektur:** `.env` dimuat dari root project. `SPREADSHEET_ID`, token Fonnte/Groq, webhook secret dan ID folder backup berasal dari environment. `RECAP_ENABLED`, `RECAP_LAZY_TRIGGER_ENABLED`, dan `RECAP_BOUNDARY_DAYS` mengontrol fitur subtotal otomatis.
 
 ### 📄 `app/models.py`
 **Peran Utama:** Mendefinisikan model Pydantic untuk struktur data transaksi, respons Groq, dan payload webhook.
@@ -166,6 +166,10 @@ Dokumen ini memetakan seluruh **26 file Python** di bawah `app/` berdasarkan kod
 - `get_all_records_many(sheet_names: list[str]) -> dict[str, list[dict]]`: Membaca dan mengubah values menjadi records untuk satu/beberapa sheet.
 - `get_all_records(sheet_name: str) -> list`: Convenience wrapper untuk membaca records satu sheet.
 - `find_transaction_ids(sheet_names: list[str], tx_ids: list[str]) -> dict[str, list[str]]`: Mencari ID hanya pada kolom `Transaction ID` dan mengembalikan worksheet yang memuat tiap ID.
+- `find_subtotal_rows(sheet_name: str, label_prefix: str) -> list[int]`: Mencari index baris subtotal berdasarkan prefix label.
+- `insert_rows_after(sheet_name: str, after_row: int, rows: list[list]) -> None`: Menambah baris setelah index tertentu.
+- `rewrite_period_block(sheet_name: str, start_row: int, end_row: int, new_rows: list[list]) -> None`: Menulis ulang blok baris secara atomik.
+- `delete_rows_bottom_up(sheet_name: str, row_indices: list[int]) -> int`: Menghapus beberapa baris sekaligus dari bawah ke atas.
 - `archive_unit_transactions(rows_by_unit: dict, archived_at: str) -> int`: Menyalin baris, memverifikasi set ID dan menulis manifest `_Meta` sebelum menghapus sumber; mismatch menghasilkan `ArchiveVerificationError` tanpa delete.
 - `verify_archive_manifest(manifest_key: str) -> dict`: Membandingkan count dan hash ID arsip dengan manifest.
 - `rollback_archive(manifest_key: str, apply: bool = True) -> dict`: Menghitung atau memulihkan baris ledger yang hilang dari arsip yang lolos verifikasi.
@@ -191,6 +195,7 @@ Dokumen ini memetakan seluruh **26 file Python** di bawah `app/` berdasarkan kod
 - `save_monthly_recap(target: date | None = None) -> None`: Mengganti rekap bulanan pada worksheet recap.
 - `send_daily_recap() -> str`: Mengirim rekap harian ke nomor notifikasi dan menyimpannya.
 - `send_previous_month_recap() -> str`: Mengirim serta menyimpan rekap bulan sebelumnya.
+- `_lazy_trigger_recap(now: datetime, trigger_source: str) -> None`: Memicu perhitungan subtotal/total secara lazy jika melewati batas periode.
 - `handle_help_command(message: str) -> str | None`: Menghasilkan panduan bot untuk perintah bantuan yang dikenali.
 - `help_copy_messages() -> list[str]`: Mengembalikan contoh pesan transaksi siap salin.
 
@@ -252,6 +257,25 @@ Dokumen ini memetakan seluruh **26 file Python** di bawah `app/` berdasarkan kod
 - `jalankan_rekap_bulanan(target_month: str) -> str`: Menyimpan satu rekap untuk seluruh rentang bulan.
 
 **Catatan Arsitektur:** Service menghapus baris label periode lama sebelum append hasil baru, sehingga eksekusi ulang mengganti periode tersebut. Minggu laporan adalah blok 1-7, 8-14, 15-21, 22-akhir bulan, bukan minggu kalender. Worksheet tujuan harus sudah tersedia.
+
+### 📄 `app/services/periodic_total_service.py`
+**Peran Utama:** Mengelola logika periode (mingguan/bulanan), perhitungan subtotal/total, pengurutan blok transaksi, dan penulisan baris total ke ledger.
+
+**Prinsip SOLID yang Dijaga:** Single Responsibility pada agregasi periodik; memisahkan logika rekap otomatis dari pencatatan transaksi harian.
+
+**Dependensi (Import):** Standard library `calendar`, `logging`, `dataclasses`, `datetime`, `threading.RLock`; `app.config.config`; `app.core.utils`; `app.repositories.sheet_repo`.
+
+**Fungsi/Class Publik:**
+- `Period`: Dataclass untuk label dan rentang tanggal periode.
+- `PeriodTotal`: Dataclass untuk hasil agregat periode.
+- `get_period_boundaries(year, month)`: Menghasilkan 4 minggu + 1 bulan sebagai objek Period.
+- `compute_period_total(sheet_name, period)`: Menghitung Pemasukan, Pengeluaran, dan Saldo Akhir untuk satu periode.
+- `ensure_sorted(sheet_name, period)`: Memastikan transaksi dalam blok periode terurut berdasarkan Tanggal dan Transaction ID.
+- `write_period_total(sheet_name, period)`: Menulis baris SUBTOTAL MINGGU ke ledger.
+- `write_monthly_total(sheet_name, year, month)`: Menulis baris TOTAL BULAN ke ledger.
+- `process_all_units_period(year, month, period_kind, week_index)`: Menjalankan penulisan total untuk semua unit usaha.
+
+**Catatan Arsitektur:** Baris subtotal ditandai dengan label khusus di kolom Keterangan. Perhitungan saldo akhir mengambil saldo baris transaksi terakhir dalam periode atau saldo terakhir sebelum periode dimulai jika kosong.
 
 ### 📄 `app/services/rekap_service.py`
 **Peran Utama:** Menyediakan formatter rekap penjualan sederhana.
@@ -393,6 +417,16 @@ Dokumen ini memetakan seluruh **26 file Python** di bawah `app/` berdasarkan kod
 - `main(argv: list[str] | None = None) -> int`: CLI `python -m app.migrate_tx_id`; dry-run default, `--apply` untuk menulis.
 
 **Catatan Arsitektur:** Targetnya seluruh ledger unit, `(2)Rincian Transaksi Harian`, dan `_ArsipTransaksi`. Untuk data lama sender asli tidak tersedia, sehingga ID migrasi dibentuk dari field baris dengan sender kosong. Penulisan ID dibatch per worksheet untuk mengurangi request API. Baris dengan tanggal kosong/tidak valid dilewati dan jumlahnya ditampilkan per worksheet.
+
+### 📄 `app/migrate_periodic_totals.py`
+**Peran Utama:** CLI untuk melakukan migrasi atau backfill subtotal mingguan dan total bulanan secara manual.
+
+**Dependensi (Import):** Standard library `argparse`, `logging`, `sys`, `datetime`; `app.config.config`; `app.core.utils.now_tz`; `app.services.periodic_total_service`.
+
+**Fungsi Publik:**
+- `main()`: Entry point CLI yang menerima parameter `--apply`, `--month`, dan `--all-units`.
+
+**Catatan Arsitektur:** Digunakan sebagai recovery tool jika lazy trigger terlewat atau untuk inisialisasi data lama. Bersifat idempoten (mengganti baris subtotal yang sudah ada).
 
 ### 📄 `app/verify_archive.py`
 **Peran Utama:** CLI untuk memeriksa ulang manifest arsip atau merencanakan/melakukan restore ke ledger.

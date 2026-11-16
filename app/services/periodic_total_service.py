@@ -1,5 +1,6 @@
 import calendar
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from threading import RLock
@@ -85,18 +86,15 @@ def get_period_for_date(target: date) -> Period:
 def is_subtotal_row(row: list) -> bool:
     """Recognize subtotal labels in current and legacy ledger layouts."""
     return any(
-        str(row[index]).strip().upper().startswith(("SUBTOTAL MINGGU", "TOTAL BULAN"))
-        for index in (2, 3)
-        if index < len(row)
+        str(value).strip().upper().startswith(("SUBTOTAL MINGGU", "TOTAL BULAN"))
+        for value in row
     )
 
 def _subtotal_label(row: list, description_index: int | None) -> str:
-    indices = list(dict.fromkeys(index for index in (description_index, 2, 3) if index is not None))
     return next((
-        str(row[index]).strip()
-        for index in indices
-        if index < len(row)
-        and str(row[index]).strip().upper().startswith(("SUBTOTAL MINGGU", "TOTAL BULAN"))
+        str(value).strip()
+        for value in row
+        if str(value).strip().upper().startswith(("SUBTOTAL MINGGU", "TOTAL BULAN"))
     ), "")
 
 def _column_indices(sheet_name: str, values: list[list]) -> dict[str, int | None]:
@@ -318,6 +316,23 @@ def write_period_total(sheet_name: str, period: Period) -> PeriodTotal:
         date_index = columns["date"] if columns["date"] is not None else 0
         last_transaction_row = None
         last_prior_row = None
+        first_future_row = None
+        previous_week_rows = []
+        week_index = None
+        month_year_label = format_tanggal_id(datetime(period.start_date.year, period.start_date.month, 1)).split()[-2:]
+        month_year_text = " ".join(month_year_label)
+        for index, row in enumerate(values):
+            if index <= columns["header"]:
+                continue
+            label = _subtotal_label(row, columns["description"])
+            match = re.match(r"SUBTOTAL MINGGU\s+(\d+)", label.upper())
+            if match and month_year_text.casefold() in label.casefold():
+                if week_index is None:
+                    period_match = re.match(r"SUBTOTAL MINGGU\s+(\d+)", period.label.upper())
+                    week_index = int(period_match.group(1)) if period_match else None
+                if week_index is not None and int(match.group(1)) < week_index:
+                    previous_week_rows.append(index + 1)
+
         for index, row in enumerate(values):
             if index <= columns["header"] or is_subtotal_row(row):
                 continue
@@ -326,9 +341,15 @@ def write_period_total(sheet_name: str, period: Period) -> PeriodTotal:
                 last_transaction_row = index + 1
             elif row_date and row_date < period.start_date:
                 last_prior_row = index + 1
+            elif row_date and row_date > period.end_date:
+                first_future_row = min(first_future_row or index + 1, index + 1)
 
         header_row = columns["header"] + 1
-        insert_after = last_transaction_row or last_prior_row or header_row
+        if last_transaction_row is not None:
+            insert_after = last_transaction_row
+        else:
+            prior_anchor = max([header_row, *(previous_week_rows), *( [last_prior_row] if last_prior_row else [])])
+            insert_after = min(prior_anchor, first_future_row - 1) if first_future_row else prior_anchor
         new_row = _build_total_row(sheet_name, period, total)
         sheet_repo.insert_rows_after(sheet_name, insert_after, [new_row])
         return total
@@ -336,8 +357,8 @@ def write_period_total(sheet_name: str, period: Period) -> PeriodTotal:
 def _build_total_row(sheet_name: str, period: Period, total: PeriodTotal) -> list:
     if sheet_name == "(2)Rincian Transaksi Harian":
         return [
-            period.end_date.strftime("%Y-%m-%d"), "", period.label,
-            "", "", total.pemasukan, total.pengeluaran, "",
+            "", "", "", "", period.label,
+            total.pemasukan, total.pengeluaran, "",
         ]
     return [
         period.end_date.strftime("%Y-%m-%d"), "", period.label,

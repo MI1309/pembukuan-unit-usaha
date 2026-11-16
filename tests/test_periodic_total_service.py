@@ -154,7 +154,8 @@ def test_daily_subtotal_is_inserted_after_last_data_row(
     _, after_row, inserted_rows = mock_insert.call_args.args
     assert after_row == 8
     assert len(inserted_rows[0]) == 8
-    assert inserted_rows[0][2] == period.label
+    assert inserted_rows[0][4] == period.label
+    assert inserted_rows[0][5:7] == [1200, 0]
 
 @patch("app.repositories.sheet_repo.get_sheet")
 def test_insert_rows_after_uses_physical_row_number(mock_get_sheet):
@@ -189,6 +190,57 @@ def test_insert_rows_after_colors_weekly_and_monthly_totals_differently(mock_get
         {"red": 0.82, "green": 0.91, "blue": 0.84},
     ]
     assert [request["repeatCell"]["range"]["startRowIndex"] for request in requests] == [10, 11]
+
+@patch("app.repositories.sheet_repo.get_sheet")
+def test_daily_total_style_is_limited_to_label_and_amount_columns(mock_get_sheet):
+    from app.repositories.sheet_repo import insert_rows_after
+
+    worksheet = MagicMock()
+    worksheet.id = 42
+    mock_get_sheet.return_value = worksheet
+
+    insert_rows_after(
+        "(2)Rincian Transaksi Harian", 10,
+        [["", "", "", "", "SUBTOTAL MINGGU 1", 1200, 0, ""]],
+    )
+
+    formatted_range = worksheet.spreadsheet.batch_update.call_args.args[0]["requests"][0]["repeatCell"]["range"]
+    assert formatted_range["startColumnIndex"] == 4
+    assert formatted_range["endColumnIndex"] == 7
+
+@patch("app.repositories.sheet_repo.insert_rows_after")
+@patch("app.services.periodic_total_service.compute_period_total")
+@patch("app.repositories.sheet_repo.get_sheet")
+@patch("app.services.periodic_total_service.ensure_sorted")
+def test_empty_week_totals_stay_in_order_before_later_week_transactions(
+    mock_sorted, mock_get_sheet, mock_compute, mock_insert,
+):
+    from app.services.periodic_total_service import get_period_boundaries
+
+    worksheet = MagicMock()
+    mock_get_sheet.return_value = worksheet
+    periods = get_period_boundaries(2026, 11)
+    worksheet.get_all_values.return_value = [
+        ["Industri Pertanian Terpadu Lentera Farm"], [], ["Periode: November 2026"], [],
+        ["Tanggal", "Nama Produk /Jasa/ Barang", "Keterangan Transaksi", "Kuantitas", "Satuan (Rp)", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Transaction ID"],
+        ["2026-11-16", "Produk", "", "1", "unit", "500", "0", "TX1"],
+    ]
+    mock_compute.side_effect = lambda sheet, period: PeriodTotal(period, 0, 0, 0)
+
+    write_period_total("(2)Rincian Transaksi Harian", periods[0])
+    _, first_after, first_row = mock_insert.call_args.args
+    assert first_after == 5
+    assert first_row[0][4] == periods[0].label
+
+    worksheet.get_all_values.return_value = [
+        *worksheet.get_all_values.return_value[:5],
+        first_row[0],
+        worksheet.get_all_values.return_value[5],
+    ]
+    write_period_total("(2)Rincian Transaksi Harian", periods[1])
+    _, second_after, second_row = mock_insert.call_args.args
+    assert second_after == 6
+    assert second_row[0][4] == periods[1].label
 
 @patch("app.repositories.sheet_repo.rewrite_period_block")
 @patch("app.repositories.sheet_repo._detect_header_row_index")

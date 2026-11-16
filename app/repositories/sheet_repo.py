@@ -1476,14 +1476,15 @@ def insert_rows_after(sheet_name: str, after_row: int, rows: list[list]) -> None
         if not label:
             continue
         is_month_total = label.startswith("TOTAL BULAN")
+        is_daily_detail = sheet_name == "(2)Rincian Transaksi Harian"
         total_formats.append({
             "repeatCell": {
                 "range": {
                     "sheetId": worksheet.id,
                     "startRowIndex": after_row + offset,
                     "endRowIndex": after_row + offset + 1,
-                    "startColumnIndex": 0,
-                    "endColumnIndex": max(len(values), 1),
+                    "startColumnIndex": 4 if is_daily_detail else 0,
+                    "endColumnIndex": 7 if is_daily_detail else max(len(values), 1),
                 },
                 "cell": {"userEnteredFormat": {
                     "backgroundColor": (

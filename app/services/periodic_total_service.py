@@ -286,45 +286,44 @@ def ensure_sorted(sheet_name: str, period: Period) -> bool:
     return True
 
 def write_period_total(sheet_name: str, period: Period, force: bool = False) -> PeriodTotal:
-    """
-    Replace the matching subtotal at the period boundary. Empty weeks get
-    a zero subtotal only when the ledger contains transactions elsewhere.
-    Jika force=True, guard tanggal dilewati (untuk update real-time minggu berjalan).
-    """
     with _PERIOD_LOCK:
-        if not force and now_tz().date() < period.end_date:
-            return compute_period_total(sheet_name, period)
-        ensure_sorted(sheet_name, period)
         worksheet = sheet_repo.get_sheet(sheet_name, create=False)
-        values = worksheet.get_all_values() if worksheet else []
+        if not worksheet:
+            return PeriodTotal(period, 0, 0, 0)
+            
+        values = worksheet.get_all_values()
         columns = _resolved_columns(sheet_name, values)
         description_index = columns["description"]
+
+        # 1. Hapus subtotal lama jika ada (biar tidak dobel)
         old_rows = []
         for index, row in enumerate(values):
             if index <= columns["header"] or description_index is None:
                 continue
-            label = _subtotal_label(row, description_index)
-            if label == period.label:
+            if _subtotal_label(row, description_index) == period.label:
                 old_rows.append(index + 1)
+        if old_rows:
+            sheet_repo.delete_rows_bottom_up(sheet_name, old_rows)
+            values = worksheet.get_all_values()
+            columns = _resolved_columns(sheet_name, values)
 
-        to_delete = old_rows
-        if to_delete:
-            sheet_repo.delete_rows_bottom_up(sheet_name, to_delete)
-
+        # 2. Hitung total transaksi
         total = compute_period_total(sheet_name, period)
-        values = worksheet.get_all_values() if worksheet else []
+        
+        # 3. JIKA TIDAK ADA TRANSAKSI (0), JANGAN TULIS APA-APA!
+        if total.pemasukan == 0 and total.pengeluaran == 0:
+            return total
+
+        # 4. Cari baris transaksi terakhir DI PERIODE INI
         latest_date, insert_after = _latest_transaction_position(sheet_name, values, period)
-        if latest_date is None:
-            if not _has_transaction_rows(sheet_name, values):
-                return total
-            insert_after = _last_row_before_period(sheet_name, values, period)
         if insert_after is None or insert_after < columns["header"] + 1:
             insert_after = columns["header"] + 1
 
+        # 5. Sisipkan tepat di bawah transaksi terakhir
         new_row = _build_total_row(sheet_name, period, total)
         sheet_repo.insert_rows_after(sheet_name, insert_after, [new_row])
         return total
-
+    
 def _build_total_row(sheet_name: str, period: Period, total: PeriodTotal) -> list:
     """
     Bangun baris total sesuai layout header masing-masing sheet.
@@ -566,32 +565,36 @@ def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = Fa
         boundaries = get_period_boundaries(year, month)
         monthly_period = next(p for p in boundaries if p.kind == "month")
         
-        # JANGAN tulis total bulan jika bulan belum berakhir (kecuali dipaksa)
         if not force and now_tz().date() < monthly_period.end_date:
             return compute_period_total(sheet_name, monthly_period)
             
-        ensure_sorted(sheet_name, monthly_period)
         worksheet = sheet_repo.get_sheet(sheet_name, create=False)
         if not worksheet:
             return PeriodTotal(monthly_period, 0, 0, 0)
             
-        values = worksheet.get_all_values() if worksheet else []
+        values = worksheet.get_all_values()
         columns = _resolved_columns(sheet_name, values)
         description_index = columns["description"]
-        
-        # Hapus total bulan lama jika ada
-        to_delete = [
+
+        # 1. Hapus total bulan lama
+        old_rows = [
             index + 1 for index, row in enumerate(values)
             if index > columns["header"] and description_index is not None
             and _subtotal_label(row, description_index) == monthly_period.label
         ]
-        if to_delete:
-            sheet_repo.delete_rows_bottom_up(sheet_name, to_delete)
-            values = worksheet.get_all_values() if worksheet else []
+        if old_rows:
+            sheet_repo.delete_rows_bottom_up(sheet_name, old_rows)
+            values = worksheet.get_all_values()
+            columns = _resolved_columns(sheet_name, values)
 
+        # 2. Hitung total
         total = compute_period_total(sheet_name, monthly_period)
         
-        # Cari posisi sisip PALING BAWAH (setelah subtotal minggu 4 atau setelah transaksi terakhir)
+        # 3. JIKA 0, JANGAN TULIS
+        if total.pemasukan == 0 and total.pengeluaran == 0:
+            return total
+
+        # 4. Cari posisi: Setelah subtotal minggu 4 ATAU setelah transaksi terakhir
         week4_period = boundaries[3]
         week4_total_rows = [
             index + 1 for index, row in enumerate(values)
@@ -602,19 +605,14 @@ def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = Fa
         if week4_total_rows:
             insert_after = max(week4_total_rows)
         else:
-            latest_date, latest_transaction_row = _latest_transaction_position(sheet_name, values, monthly_period)
-            if latest_date is None:
-                 insert_after = _last_row_before_period(sheet_name, values, monthly_period)
-            else:
-                 insert_after = latest_transaction_row
+            latest_date, insert_after = _latest_transaction_position(sheet_name, values, monthly_period)
+            if insert_after is None:
+                 insert_after = columns["header"] + 1
 
-        if insert_after is None or insert_after < columns["header"] + 1:
-            insert_after = columns["header"] + 1
-            
         new_row = _build_total_row(sheet_name, monthly_period, total)
         sheet_repo.insert_rows_after(sheet_name, insert_after, [new_row])
         return total
-    
+        
     
     
 def process_all_units_period(year: int, month: int,

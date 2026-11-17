@@ -768,6 +768,30 @@ def _process_recap_period(year: int, month: int, kind: str, label: str, force: b
         raise RuntimeError(f"recap failed for {label}, units: {', '.join(failures)}")
     
 def _refresh_saved_periods(saved_sales: list[dict], trigger_source: str) -> None:
+    if not getattr(config, "RECAP_ENABLED", True):
+        return
+
+    periods_to_update = set()
+    for sale in saved_sales:
+        tgl = sale["tanggal"]
+        boundaries = periodic_total_service.get_period_boundaries(tgl.year, tgl.month)
+        
+        week_p = next(p for p in boundaries if p.kind == "week" and p.start_date <= tgl <= p.end_date)
+        periods_to_update.add((week_p, sale["unit"]))
+        periods_to_update.add((week_p, "(2)Rincian Transaksi Harian"))
+        
+        month_p = boundaries[-1]
+        if tgl >= month_p.end_date or now_tz().date() >= month_p.end_date:
+            periods_to_update.add((month_p, sale["unit"]))
+            periods_to_update.add((month_p, "(2)Rincian Transaksi Harian"))
+
+    for period, unit in periods_to_update:
+        try:
+            periodic_total_service.write_period_total(unit, period, force=True)
+            if period.kind == "month":
+                periodic_total_service.write_monthly_total(unit, period.start_date.year, period.start_date.month, force=True)
+        except Exception as e:
+            logger.warning("refresh saved period failed for %s %s: %s", unit, period.label, e)
     """Update subtotal berdasarkan TANGGAL TRANSAKSI, bukan tanggal hari ini."""
     if not getattr(config, "RECAP_ENABLED", True):
         return

@@ -256,22 +256,78 @@ def duplicate_copy_message(sale: dict) -> str:
         "Status: transaksi ini sudah tercatat, tidak perlu dicatat ulang."
     )
 
+def _parse_pipe_local(line: str) -> dict | None:
+    """Mem-parsing format pipa lokal tanpa membuang kuota Groq AI."""
+    parts = [p.strip() for p in line.split("|")]
+    if len(parts) < 4:
+        return None
+        
+    aksi = parts[0]
+    is_penjualan = "beli" not in aksi.lower() and "pemb" not in aksi.lower()
+    
+    keterangan = parts[1]
+    
+    qty_unit = parts[2]
+    qty_match = re.search(r"([\d\.,]+)\s*(.*)", qty_unit)
+    if not qty_match:
+        return None
+    kuantitas = float(qty_match.group(1).replace(",", "."))
+    satuan = qty_match.group(2).strip()
+    
+    harga_satuan = parts[3]
+    
+    tanggal = ""
+    if len(parts) >= 5:
+        tanggal = parts[4].replace("tanggal", "").replace("tgl", "").strip()
+
+    return {
+        "is_penjualan": is_penjualan,
+        "produk": aksi,
+        "keterangan": keterangan,
+        "kuantitas": kuantitas,
+        "satuan": satuan,
+        "harga_satuan": harga_satuan,
+        "tanggal": tanggal
+    }
+
 
 def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tuple[bool, str, dict | None]:
-    # --- PERBAIKAN MULTILINE: Pecah pesan per baris agar AI tidak terpotong ---
+    import time
+    
     lines = [line.strip() for line in message.splitlines() if line.strip()]
     
     raw_items = []
+    
+    # --- PERBAIKAN MULTILINE & GROQ 429 ---
     if len(lines) > 1:
-        # Jika lebih dari 1 baris, proses masing-masing baris secara terpisah
+        # Jika banyak baris (seperti 30 transaksi)
         for line in lines:
-            parsed = analyze_sales(line)
-            raw_items.extend(parsed.get("transaksi", []) if isinstance(parsed, dict) else [])
+            if "|" in line:
+                # Format pipa eksplisit -> Parsing Lokal (0 Kuota Groq)
+                parsed_local = _parse_pipe_local(line)
+                if parsed_local:
+                    raw_items.append(parsed_local)
+                else:
+                    parsed = analyze_sales(line)
+                    raw_items.extend(parsed.get("transaksi", []) if isinstance(parsed, dict) else [])
+            else:
+                # Jika tidak ada pipa, terpaksa pakai Groq (beri jeda 2.1 detik agar tidak kena OTPM)
+                time.sleep(2.1)
+                parsed = analyze_sales(line)
+                raw_items.extend(parsed.get("transaksi", []) if isinstance(parsed, dict) else [])
     else:
-        # Jika hanya 1 baris, proses seperti biasa
-        parsed = analyze_sales(message)
-        raw_items = parsed.get("transaksi", []) if isinstance(parsed, dict) else []
-    # -------------------------------------------------------------------------
+        # Jika hanya 1 baris
+        if "|" in message:
+            parsed_local = _parse_pipe_local(message)
+            if parsed_local:
+                raw_items.append(parsed_local)
+            else:
+                parsed = analyze_sales(message)
+                raw_items = parsed.get("transaksi", []) if isinstance(parsed, dict) else []
+        else:
+            parsed = analyze_sales(message)
+            raw_items = parsed.get("transaksi", []) if isinstance(parsed, dict) else []
+    # ----------------------------------------
 
     prepared = []
     failed = []
@@ -364,6 +420,7 @@ def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tu
         if len(failed) > 10:
             lines.append(f"... dan {len(failed) - 10} baris gagal lainnya")
     return True, "\n".join(lines), {"saved": len(saved), "duplicates": duplicates}
+
 
 def _parse_date(value) -> date | None:
     if isinstance(value, datetime):

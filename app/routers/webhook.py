@@ -45,13 +45,6 @@ def _safe_lazy_trigger(now, source: str) -> None:
         logging.warning("lazy recap failed: %s", error)
 
 
-def _safe_refresh_current_totals(now, source: str) -> None:
-    try:
-        sales_service._refresh_current_period_totals(now, source)
-    except Exception as error:
-        logging.warning("current totals refresh failed: %s", error)
-
-
 def _start_background_recap(target, source: str) -> None:
     threading.Thread(
         target=target,

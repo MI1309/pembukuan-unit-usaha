@@ -566,6 +566,7 @@ def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = Fa
         boundaries = get_period_boundaries(year, month)
         monthly_period = next(p for p in boundaries if p.kind == "month")
         
+        # JANGAN tulis total bulan jika bulan belum berakhir (kecuali dipaksa)
         if not force and now_tz().date() < monthly_period.end_date:
             return compute_period_total(sheet_name, monthly_period)
             
@@ -590,8 +591,7 @@ def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = Fa
 
         total = compute_period_total(sheet_name, monthly_period)
         
-        # Cari posisi sisip
-        # Prioritas: Sisipkan setelah subtotal minggu 4 (akhir bulan)
+        # Cari posisi sisip PALING BAWAH (setelah subtotal minggu 4 atau setelah transaksi terakhir)
         week4_period = boundaries[3]
         week4_total_rows = [
             index + 1 for index, row in enumerate(values)
@@ -602,8 +602,6 @@ def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = Fa
         if week4_total_rows:
             insert_after = max(week4_total_rows)
         else:
-            # Jika belum ada subtotal minggu 4 (misal karena kosong), 
-            # taruh setelah transaksi terakhir sebulan itu
             latest_date, latest_transaction_row = _latest_transaction_position(sheet_name, values, monthly_period)
             if latest_date is None:
                  insert_after = _last_row_before_period(sheet_name, values, monthly_period)
@@ -616,7 +614,9 @@ def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = Fa
         new_row = _build_total_row(sheet_name, monthly_period, total)
         sheet_repo.insert_rows_after(sheet_name, insert_after, [new_row])
         return total
-
+    
+    
+    
 def process_all_units_period(year: int, month: int,
                              period_kind: Literal["week", "month"] = "week",
                              week_index: int | None = None,

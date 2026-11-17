@@ -314,7 +314,7 @@ def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tu
 
     if saved:
         try:
-            _refresh_current_period_totals(now_tz(), trigger_source="sales")
+            _refresh_saved_periods(saved, "sales")
             _lazy_trigger_recap(now_tz(), trigger_source="sales")
         except Exception as recap_error:
             logger.warning("recap trigger from process_sales failed: %s", recap_error)
@@ -767,51 +767,31 @@ def _process_recap_period(year: int, month: int, kind: str, label: str, force: b
     if failures:
         raise RuntimeError(f"recap failed for {label}, units: {', '.join(failures)}")
     
-def _refresh_current_period_totals(now: datetime, trigger_source: str) -> None:
-    """Update subtotal minggu berjalan secara real-time. 
-    TOTAL BULAN tidak disentuh sampai akhir bulan tiba."""
+def _refresh_saved_periods(saved_sales: list[dict], trigger_source: str) -> None:
+    """Update subtotal berdasarkan TANGGAL TRANSAKSI, bukan tanggal hari ini."""
     if not getattr(config, "RECAP_ENABLED", True):
         return
 
-    today = now.date()
-    boundaries = periodic_total_service.get_period_boundaries(today.year, today.month)
-    current_week = next(
-        (p for p in boundaries if p.kind == "week" and p.start_date <= today <= p.end_date),
-        None,
-    )
-    
-    if current_week is not None:
-        try:
-            _process_recap_period(
-                today.year, today.month, "week", current_week.label, force=True,
-            )
-            logger.info("current-week total refreshed by %s for %s", trigger_source, current_week.label)
-        except Exception as e:
-            logger.warning("refresh current week failed: %s", e)
-    
-    month_period = boundaries[-1]
-    processed = []
+    periods_to_update = set()
+    for sale in saved_sales:
+        tgl = sale["tanggal"]
+        boundaries = periodic_total_service.get_period_boundaries(tgl.year, tgl.month)
+        
+        # 1. Dapatkan periode minggu dari tanggal transaksi
+        week_p = next(p for p in boundaries if p.kind == "week" and p.start_date <= tgl <= p.end_date)
+        periods_to_update.add((week_p, sale["unit"]))
+        periods_to_update.add((week_p, "(2)Rincian Transaksi Harian"))
+        
+        # 2. Cek apakah ini akhir bulan? Jika ya, update total bulan
+        month_p = boundaries[-1]
+        if tgl >= month_p.end_date or now_tz().date() >= month_p.end_date:
+            periods_to_update.add((month_p, sale["unit"]))
+            periods_to_update.add((month_p, "(2)Rincian Transaksi Harian"))
 
-    if current_week is not None:
+    for period, unit in periods_to_update:
         try:
-            _process_recap_period(
-                today.year, today.month, "week", current_week.label, force=True,
-            )
-            processed.append(current_week.label)
+            periodic_total_service.write_period_total(unit, period, force=True)
+            if period.kind == "month":
+                periodic_total_service.write_monthly_total(unit, period.start_date.year, period.start_date.month, force=True)
         except Exception as e:
-            logger.warning("refresh current week failed: %s", e)
-
-    if month_period.start_date <= today <= month_period.end_date:
-        try:
-            _process_recap_period(
-                today.year, today.month, "month", month_period.label, force=True,
-            )
-            processed.append(month_period.label)
-        except Exception as e:
-            logger.warning("refresh current month failed: %s", e)
-
-    if processed:
-        logger.info(
-            "current-period totals refreshed by %s for %s",
-            trigger_source, ", ".join(processed),
-        )
+            logger.warning("refresh saved period failed for %s %s: %s", unit, period.label, e)

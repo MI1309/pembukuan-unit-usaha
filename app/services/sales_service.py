@@ -258,8 +258,21 @@ def duplicate_copy_message(sale: dict) -> str:
 
 
 def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tuple[bool, str, dict | None]:
-    parsed = analyze_sales(message)
-    raw_items = parsed.get("transaksi", []) if isinstance(parsed, dict) else []
+    # --- PERBAIKAN MULTILINE: Pecah pesan per baris agar AI tidak terpotong ---
+    lines = [line.strip() for line in message.splitlines() if line.strip()]
+    
+    raw_items = []
+    if len(lines) > 1:
+        # Jika lebih dari 1 baris, proses masing-masing baris secara terpisah
+        for line in lines:
+            parsed = analyze_sales(line)
+            raw_items.extend(parsed.get("transaksi", []) if isinstance(parsed, dict) else [])
+    else:
+        # Jika hanya 1 baris, proses seperti biasa
+        parsed = analyze_sales(message)
+        raw_items = parsed.get("transaksi", []) if isinstance(parsed, dict) else []
+    # -------------------------------------------------------------------------
+
     prepared = []
     failed = []
     for raw in raw_items:
@@ -273,6 +286,7 @@ def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tu
                 sale["penjualan"], sale["keterangan"], sale["unit"],
             )
             prepared.append(sale)
+            
     if not prepared and not failed:
         return False, "", None
 
@@ -314,7 +328,6 @@ def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tu
     if saved:
         try:
             # --- OPTIMASI KUOTA: REBUILD SEKALI JALAN ---
-            # Menggantikan fungsi _refresh_saved_periods yang memakan banyak kuota Read/Write
             from app.services.periodic_total_service import rebuild_sheet_with_totals
             units_affected = set(sale["unit"] for sale in prepared)
             units_affected.add("(2)Rincian Transaksi Harian")
@@ -351,7 +364,6 @@ def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tu
         if len(failed) > 10:
             lines.append(f"... dan {len(failed) - 10} baris gagal lainnya")
     return True, "\n".join(lines), {"saved": len(saved), "duplicates": duplicates}
-
 
 def _parse_date(value) -> date | None:
     if isinstance(value, datetime):

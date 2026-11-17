@@ -535,26 +535,37 @@ def normalize_row_formatting(sheet_name: str) -> int:
     """Backward-compatible name for transaction row normalization."""
     return normalize_sheet_rows(sheet_name)
 
-
 def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = False) -> PeriodTotal:
-    """
-    Replace the monthly total immediately after the week-4 subtotal, or after
-    the month's final transaction when no week-4 subtotal exists.
-    Jika force=True, guard tanggal dilewati.
-    """
+    """Replace the monthly total. Hanya tulis jika minggu 4 sudah ada (atau jika dipaksa akhir bulan)."""
     with _PERIOD_LOCK:
         boundaries = get_period_boundaries(year, month)
         monthly_period = next(p for p in boundaries if p.kind == "month")
+        week4_period = boundaries[3]
+        
+        # Jangan tulis total bulan jika bulan belum berakhir (kecuali force)
         if not force and now_tz().date() < monthly_period.end_date:
             return compute_period_total(sheet_name, monthly_period)
-        week4_period = boundaries[3]
+            
         ensure_sorted(sheet_name, monthly_period)
         worksheet = sheet_repo.get_sheet(sheet_name, create=False)
         if not worksheet:
             return PeriodTotal(monthly_period, 0, 0, 0)
+            
         values = worksheet.get_all_values() if worksheet else []
         columns = _resolved_columns(sheet_name, values)
         description_index = columns["description"]
+        
+        # Cari subtotal minggu 4
+        week4_total_rows = [
+            index + 1 for index, row in enumerate(values)
+            if index > columns["header"]
+            and _subtotal_label(row, description_index) == week4_period.label
+        ]
+        
+        # JIKA bukan akhir bulan dan subtotal minggu 4 belum ada, JANGAN tulis Total Bulan
+        if not force and not week4_total_rows and now_tz().date() < monthly_period.end_date:
+            return compute_period_total(sheet_name, monthly_period)
+
         to_delete = [
             index + 1 for index, row in enumerate(values)
             if index > columns["header"] and description_index is not None
@@ -567,6 +578,7 @@ def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = Fa
         values = worksheet.get_all_values() if worksheet else []
         columns = _resolved_columns(sheet_name, values)
         description_index = columns["description"]
+        
         latest_date, latest_transaction_row = _latest_transaction_position(
             sheet_name, values, monthly_period,
         )
@@ -578,14 +590,17 @@ def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = Fa
         if latest_transaction_row is None or latest_transaction_row < columns["header"] + 1:
             latest_transaction_row = columns["header"] + 1
 
+        # Re-fetch week4 rows after deletion
         week4_total_rows = [
             index + 1 for index, row in enumerate(values)
             if index > columns["header"]
             and _subtotal_label(row, description_index) == week4_period.label
         ]
+        
         insert_after = max(week4_total_rows) if week4_total_rows else latest_transaction_row
         if insert_after is None or insert_after < columns["header"] + 1:
             insert_after = columns["header"] + 1
+            
         new_row = _build_total_row(sheet_name, monthly_period, total)
         sheet_repo.insert_rows_after(sheet_name, insert_after, [new_row])
         return total
@@ -596,8 +611,7 @@ def process_all_units_period(year: int, month: int,
                              week_index: int | None = None,
                              force: bool = False,
                              unit_names: list[str] | None = None) -> dict:
-    """Loop 5 unit ledger, panggil write_period_total / 
-    write_monthly_total. Return dict {unit: PeriodTotal}."""
+    """Loop semua unit ledger, panggil write_period_total / write_monthly_total."""
     results = {}
     boundaries = get_period_boundaries(year, month)
     
@@ -608,9 +622,24 @@ def process_all_units_period(year: int, month: int,
             raise ValueError("week_index is required for week period")
         target_period = boundaries[week_index - 1]
         
-    units = unit_names if unit_names is not None else config.LEDGER_UNITS
+    units = unit_names if unit_names is not None else config.UNIT_USAHA
     for unit in units:
         try:
+            # Cek apakah sheet ini punya transaksi sama sekali
+            worksheet = sheet_repo.get_sheet(unit, create=False)
+            has_data = False
+            if worksheet:
+                values = worksheet.get_all_values()
+                # Anggap punya data jika ada baris setelah header yang bukan subtotal
+                if len(values) > 2: 
+                    # Cek apakah selain header dan subtotal ada isinya
+                    if any(not is_subtotal_row(row) for row in values[2:]):
+                        has_data = True
+            
+            # Jika tidak ada data, skip agar tidak menulis Total 0
+            if not has_data and period_kind == "month":
+                continue
+
             if period_kind == "month":
                 res = write_monthly_total(unit, year, month, force=force)
             else:

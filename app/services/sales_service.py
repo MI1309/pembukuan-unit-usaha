@@ -749,24 +749,27 @@ def _lazy_trigger_recap(now: datetime, trigger_source: str) -> None:
 
 def _process_recap_period(year: int, month: int, kind: str, label: str, force: bool = False) -> None:
     boundaries = periodic_total_service.get_period_boundaries(year, month)
+    
+    # Daftar unit: 5 unit ledger + 1 rincian harian
+    units = list(config.UNIT_USAHA) + ["(2)Rincian Transaksi Harian"]
+    
     if kind == "week":
         period = next(p for p in boundaries if p.label == label)
         week_index = boundaries.index(period) + 1
         results = periodic_total_service.process_all_units_period(
-            year, month, period_kind="week", week_index=week_index, force=force,
+            year, month, period_kind="week", week_index=week_index, force=force, unit_names=units
         )
     else:
         results = periodic_total_service.process_all_units_period(
-            year, month, period_kind="month", force=force,
+            year, month, period_kind="month", force=force, unit_names=units
         )
     failures = [unit for unit, result in results.items() if isinstance(result, Exception)]
     if failures:
         raise RuntimeError(f"recap failed for {label}, units: {', '.join(failures)}")
-
+    
 def _refresh_current_period_totals(now: datetime, trigger_source: str) -> None:
-    """Update subtotal minggu berjalan dan/atau total bulan berjalan secara
-    real-time setiap ada transaksi baru. Tidak memakai flag _Meta karena
-    tujuannya update kontinu, bukan finalisasi sekali."""
+    """Update subtotal minggu berjalan secara real-time. 
+    TOTAL BULAN tidak disentuh sampai akhir bulan tiba."""
     if not getattr(config, "RECAP_ENABLED", True):
         return
 
@@ -776,6 +779,16 @@ def _refresh_current_period_totals(now: datetime, trigger_source: str) -> None:
         (p for p in boundaries if p.kind == "week" and p.start_date <= today <= p.end_date),
         None,
     )
+    
+    if current_week is not None:
+        try:
+            _process_recap_period(
+                today.year, today.month, "week", current_week.label, force=True,
+            )
+            logger.info("current-week total refreshed by %s for %s", trigger_source, current_week.label)
+        except Exception as e:
+            logger.warning("refresh current week failed: %s", e)
+    
     month_period = boundaries[-1]
     processed = []
 

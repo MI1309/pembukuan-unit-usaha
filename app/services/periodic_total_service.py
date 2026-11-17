@@ -298,9 +298,13 @@ def rebuild_sheet_with_totals(sheet_name: str) -> None:
                     final_rows.append(_build_total_row(sheet_name, p, p_total))
                     total_row_indices.append(len(final_rows)) # Tandai index baris subtotal
                     
-            # Tambahkan Total Bulan (PERBAIKAN: Gunakan >= agar muncul di hari terakhir bulan)
+            # --- PERBAIKAN GRAND TOTAL: Cek tanggal terakhir transaksi di bulan ini ---
             month_p = boundaries[-1]
-            if now_tz().date() >= month_p.end_date:
+            month_dates = [_row_transaction_date(r, date_idx) for r in month_rows if _row_transaction_date(r, date_idx)]
+            last_tx_date = max(month_dates) if month_dates else None
+            
+            # Tampilkan Total Bulan JIKA transaksi terakhir sudah mencapai akhir bulan, ATAU sekarang sudah lewat akhir bulan
+            if (last_tx_date and last_tx_date >= month_p.end_date) or (now_tz().date() >= month_p.end_date):
                 t_pemasukan = sum(parse_amount(r[columns["income"]]) for r in month_rows if columns["income"] is not None and len(r) > columns["income"] and r[columns["income"]] != "")
                 t_pengeluaran = sum(parse_amount(r[columns["expense"]]) for r in month_rows if columns["expense"] is not None and len(r) > columns["expense"] and r[columns["expense"]] != "")
                 saldo = parse_amount(month_rows[-1][columns["balance"]]) if columns["balance"] is not None and len(month_rows[-1]) > columns["balance"] else 0
@@ -308,6 +312,7 @@ def rebuild_sheet_with_totals(sheet_name: str) -> None:
                 m_total = PeriodTotal(month_p, t_pemasukan, t_pengeluaran, saldo)
                 final_rows.append(_build_total_row(sheet_name, month_p, m_total))
                 total_row_indices.append(len(final_rows)) # Tandai index baris grand total
+            # -----------------------------------------------------------------------------
                 
         # 4. Tulis ulang (1 WRITE)
         start_row = header_idx + 2
@@ -316,7 +321,7 @@ def rebuild_sheet_with_totals(sheet_name: str) -> None:
         if len(final_rows) > 0:
             sheet_repo.rewrite_period_block(sheet_name, start_row, end_row, final_rows)
             
-            # --- PERBAIKAN: Terapkan Style (Warna Kuning/Hijau) ke baris Subtotal & Total ---
+            # --- Terapkan Style (Warna Kuning/Hijau) ke baris Subtotal & Total ---
             for rel_idx in total_row_indices:
                 abs_row_index = start_row + rel_idx - 1
                 try:
@@ -333,7 +338,7 @@ def rebuild_sheet_with_totals(sheet_name: str) -> None:
         elif len(final_rows) == 0 and len(data_rows) > 0:
             to_delete = list(range(start_row, start_row + len(data_rows)))
             sheet_repo.delete_rows_bottom_up(sheet_name, to_delete)
-
+            
 # ==============================================================================
 # FUNGSI LAMA (Dipertahankan untuk kompatibilitas, tapi tidak dipakai di alur utama)
 # ==============================================================================

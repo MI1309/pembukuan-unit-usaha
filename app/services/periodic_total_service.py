@@ -349,23 +349,29 @@ def _build_total_row(sheet_name: str, period: Period, total: PeriodTotal) -> lis
         total.pemasukan - total.pengeluaran,
         "",
     ]
-
+    
 def _latest_transaction_position(sheet_name: str, values: list[list], period: Period):
+    """
+    Mencari baris transaksi terakhir HANYA di dalam periode yang ditentukan.
+    Jika tidak ada transaksi sama sekali di periode itu, return (None, None).
+    """
     columns = _resolved_columns(sheet_name, values)
     date_index = columns["date"] if columns["date"] is not None else 0
     dated_rows = []
+    
     for index, row in enumerate(values):
         if index <= columns["header"] or is_subtotal_row(row):
             continue
         row_date = _row_transaction_date(row, date_index)
         if row_date and period.start_date <= row_date <= period.end_date:
             dated_rows.append((row_date, index + 1))
+            
     if not dated_rows:
         return None, None
+        
     latest_date = max(row_date for row_date, _ in dated_rows)
     latest_row = max(row_number for row_date, row_number in dated_rows if row_date == latest_date)
     return latest_date, latest_row
-
 
 def _has_transaction_rows(sheet_name: str, values: list[list]) -> bool:
     columns = _resolved_columns(sheet_name, values)
@@ -379,20 +385,40 @@ def _has_transaction_rows(sheet_name: str, values: list[list]) -> bool:
 
 
 def _last_row_before_period(sheet_name: str, values: list[list], period: Period) -> int:
+    """
+    Mencari baris terakhir SEBELUM periode dimulai.
+    Prioritas 1: Baris subtotal minggu sebelumnya.
+    Prioritas 2: Baris transaksi terakhir sebelum period.start_date.
+    """
     columns = _resolved_columns(sheet_name, values)
     date_index = columns["date"] if columns["date"] is not None else 0
+    description_index = columns["description"]
+    
     last_row = columns["header"] + 1
+    
     for index, row in enumerate(values):
         if index <= columns["header"]:
             continue
+            
+        # Cek jika ini baris subtotal
         if is_subtotal_row(row):
-            last_row = index + 1
+            label = _subtotal_label(row, description_index)
+            # Jika ini subtotal minggu SEBELUMNYA, jadikan kandidat posisi
+            if label.startswith("SUBTOTAL MINGGU"):
+                # Cek apakah ini minggu sebelumnya (misal period minggu 3, cari minggu 2)
+                # Kita bisa cek angka minggunya atau biarkan saja karena ini iterasi berurutan.
+                # Jika subtotal ditemukan sebelum tanggal periode, simpan posisinya.
+                last_row = index + 1
             continue
+            
+        # Cek transaksi
         row_date = _row_transaction_date(row, date_index)
         if row_date and row_date >= period.start_date:
-            break
+            break # Berhenti jika sudah masuk ke periode ini atau setelahnya
+            
         if row_date:
             last_row = index + 1
+            
     return max(0, last_row)
 
 def sort_all_transactions(sheet_name: str) -> bool:
@@ -536,13 +562,10 @@ def normalize_row_formatting(sheet_name: str) -> int:
     return normalize_sheet_rows(sheet_name)
 
 def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = False) -> PeriodTotal:
-    """Replace the monthly total. Hanya tulis jika minggu 4 sudah ada (atau jika dipaksa akhir bulan)."""
     with _PERIOD_LOCK:
         boundaries = get_period_boundaries(year, month)
         monthly_period = next(p for p in boundaries if p.kind == "month")
-        week4_period = boundaries[3]
         
-        # Jangan tulis total bulan jika bulan belum berakhir (kecuali force)
         if not force and now_tz().date() < monthly_period.end_date:
             return compute_period_total(sheet_name, monthly_period)
             
@@ -555,17 +578,7 @@ def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = Fa
         columns = _resolved_columns(sheet_name, values)
         description_index = columns["description"]
         
-        # Cari subtotal minggu 4
-        week4_total_rows = [
-            index + 1 for index, row in enumerate(values)
-            if index > columns["header"]
-            and _subtotal_label(row, description_index) == week4_period.label
-        ]
-        
-        # JIKA bukan akhir bulan dan subtotal minggu 4 belum ada, JANGAN tulis Total Bulan
-        if not force and not week4_total_rows and now_tz().date() < monthly_period.end_date:
-            return compute_period_total(sheet_name, monthly_period)
-
+        # Hapus total bulan lama jika ada
         to_delete = [
             index + 1 for index, row in enumerate(values)
             if index > columns["header"] and description_index is not None
@@ -573,38 +586,36 @@ def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = Fa
         ]
         if to_delete:
             sheet_repo.delete_rows_bottom_up(sheet_name, to_delete)
+            values = worksheet.get_all_values() if worksheet else []
 
         total = compute_period_total(sheet_name, monthly_period)
-        values = worksheet.get_all_values() if worksheet else []
-        columns = _resolved_columns(sheet_name, values)
-        description_index = columns["description"]
         
-        latest_date, latest_transaction_row = _latest_transaction_position(
-            sheet_name, values, monthly_period,
-        )
-        if latest_date is None:
-            if _has_transaction_rows(sheet_name, values):
-                latest_transaction_row = _last_row_before_period(sheet_name, values, monthly_period)
-            else:
-                latest_transaction_row = columns["header"] + 1
-        if latest_transaction_row is None or latest_transaction_row < columns["header"] + 1:
-            latest_transaction_row = columns["header"] + 1
-
-        # Re-fetch week4 rows after deletion
+        # Cari posisi sisip
+        # Prioritas: Sisipkan setelah subtotal minggu 4 (akhir bulan)
+        week4_period = boundaries[3]
         week4_total_rows = [
             index + 1 for index, row in enumerate(values)
             if index > columns["header"]
             and _subtotal_label(row, description_index) == week4_period.label
         ]
         
-        insert_after = max(week4_total_rows) if week4_total_rows else latest_transaction_row
+        if week4_total_rows:
+            insert_after = max(week4_total_rows)
+        else:
+            # Jika belum ada subtotal minggu 4 (misal karena kosong), 
+            # taruh setelah transaksi terakhir sebulan itu
+            latest_date, latest_transaction_row = _latest_transaction_position(sheet_name, values, monthly_period)
+            if latest_date is None:
+                 insert_after = _last_row_before_period(sheet_name, values, monthly_period)
+            else:
+                 insert_after = latest_transaction_row
+
         if insert_after is None or insert_after < columns["header"] + 1:
             insert_after = columns["header"] + 1
             
         new_row = _build_total_row(sheet_name, monthly_period, total)
         sheet_repo.insert_rows_after(sheet_name, insert_after, [new_row])
         return total
-
 
 def process_all_units_period(year: int, month: int,
                              period_kind: Literal["week", "month"] = "week",

@@ -76,3 +76,5 @@ logs/
 /dataset_testing_november_2026.txt
 /struktur_utama.txt
 /SAD.md
+exports/
+*.extract.json

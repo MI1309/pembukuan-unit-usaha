@@ -226,27 +226,22 @@ def compute_period_total(sheet_name: str, period: Period) -> PeriodTotal:
 
 def ensure_sorted(sheet_name: str, period: Period) -> bool:
     """
-    - Baca semua values + row index (1-based)
-    - Identifikasi blok: row index dengan tanggal dalam period,
-      bukan is_subtotal_row
-    - Cek ascending berdasarkan Tanggal, tie-break Transaction ID
-    - Jika sudah urut -> return False
-    - Jika belum -> sort di Python, tulis ulang HANYA baris
-      dalam blok pada posisi row index SAMA via rewrite_period_block,
-      return True
+    Sort transaction rows within the period block by date, tie-break by
+    Transaction ID. Preserve physical slots of non-block rows (subtotal).
+    Return True if any change was written.
     """
     worksheet = sheet_repo.get_sheet(sheet_name, create=False)
     if not worksheet:
         return False
-        
+
     values = worksheet.get_all_values()
     if not values:
         return False
-        
+
     columns = _resolved_columns(sheet_name, values)
-    block_indices = [] # 1-based physical row indices
+    block_indices = []
     block_rows = []
-    
+
     for idx, row in enumerate(values):
         if idx <= columns["header"]:
             continue
@@ -258,10 +253,10 @@ def ensure_sorted(sheet_name: str, period: Period) -> bool:
         if row_date and period.start_date <= row_date <= period.end_date:
             block_indices.append(idx + 1)
             block_rows.append(row)
-            
+
     if not block_rows:
         return False
-        
+
     def sort_key(row):
         date_index = columns["date"] if columns["date"] is not None else 0
         d = _row_transaction_date(row, date_index)
@@ -270,46 +265,34 @@ def ensure_sorted(sheet_name: str, period: Period) -> bool:
         return (d or date(9999, 12, 31), t)
 
     sorted_rows = sorted(block_rows, key=sort_key)
-    
+
     if sorted_rows == block_rows:
         return False
-        
-    # Write back the sorted block
-    # We assume block_indices are contiguous or at least we should replace them at their original positions.
-    # The requirement says "tulis ulang HANYA baris dalam blok pada posisi row index SAMA".
-    # If the block is not contiguous, rewrite_period_block as defined might not work directly if it expects a single range.
-    # However, for periodic totals, the block *should* be mostly contiguous.
-    # If it's not contiguous, we'd need multiple update calls.
-    # But rewrite_period_block takes start_row and end_row.
-    # Let's assume for now the block is contiguous for simplicity as it's a "period block".
-    
+
     start_row = min(block_indices)
     end_row = max(block_indices)
-    
-    # If not contiguous, we have a problem with rewrite_period_block.
-    # Let's check if it's contiguous.
+
     if len(block_indices) != (end_row - start_row + 1):
-        # Not contiguous. We should update one by one or in chunks.
-        # But rewrite_period_block is designed for a single block.
-        # Let's just update the whole range from start_row to end_row, 
-        # but we must preserve rows that are not in our block (like subtotal rows).
-        new_values = list(values[start_row-1:end_row])
-        for i, original_idx in enumerate(block_indices):
-            new_values[original_idx - start_row] = sorted_rows[i]
-        
-        sheet_repo.rewrite_period_block(sheet_name, start_row, end_row, new_values)
+        replacement = [list(row) for row in values[start_row - 1:end_row]]
+        sorted_iter = iter(sorted_rows)
+        for original_idx in block_indices:
+            offset = original_idx - start_row
+            if 0 <= offset < len(replacement):
+                replacement[offset] = next(sorted_iter)
+        sheet_repo.rewrite_period_block(sheet_name, start_row, end_row, replacement)
     else:
         sheet_repo.rewrite_period_block(sheet_name, start_row, end_row, sorted_rows)
-        
+
     return True
 
 def write_period_total(sheet_name: str, period: Period, force: bool = False) -> PeriodTotal:
     """
-        Replace the matching subtotal at the period boundary. Empty weeks get
-        a zero subtotal only when the ledger contains transactions elsewhere.
+    Replace the matching subtotal at the period boundary. Empty weeks get
+    a zero subtotal only when the ledger contains transactions elsewhere.
+    Jika force=True, guard tanggal dilewati (untuk update real-time minggu berjalan).
     """
     with _PERIOD_LOCK:
-        if now_tz().date() < period.end_date:
+        if not force and now_tz().date() < period.end_date:
             return compute_period_total(sheet_name, period)
         ensure_sorted(sheet_name, period)
         worksheet = sheet_repo.get_sheet(sheet_name, create=False)
@@ -335,21 +318,36 @@ def write_period_total(sheet_name: str, period: Period, force: bool = False) -> 
             if not _has_transaction_rows(sheet_name, values):
                 return total
             insert_after = _last_row_before_period(sheet_name, values, period)
+        if insert_after is None or insert_after < columns["header"] + 1:
+            insert_after = columns["header"] + 1
 
         new_row = _build_total_row(sheet_name, period, total)
         sheet_repo.insert_rows_after(sheet_name, insert_after, [new_row])
         return total
 
 def _build_total_row(sheet_name: str, period: Period, total: PeriodTotal) -> list:
+    """
+    Bangun baris total sesuai layout header masing-masing sheet.
+    Ledger unit: Nomor, Tanggal, Nama Barang, Keterangan, Kuantitas, Satuan,
+                 Pemasukan, Pengeluaran, Sisa Saldo, Transaction ID (10 kolom).
+    Rincian Harian: Tanggal, Nama Produk, Keterangan, Kuantitas, Satuan,
+                    Pemasukan, Pengeluaran, Transaction ID (8 kolom).
+    """
     if sheet_name == "(2)Rincian Transaksi Harian":
         return [
             "", "", period.label, "", "",
             total.pemasukan, total.pengeluaran, "",
         ]
     return [
-        period.end_date.strftime("%Y-%m-%d"), "", period.label,
-        "", "", total.pemasukan, total.pengeluaran,
-        total.pemasukan - total.pengeluaran, "",
+        "",
+        period.end_date.strftime("%Y-%m-%d"),
+        "",
+        period.label,
+        "", "",
+        total.pemasukan,
+        total.pengeluaran,
+        total.pemasukan - total.pengeluaran,
+        "",
     ]
 
 def _latest_transaction_position(sheet_name: str, values: list[list], period: Period):
@@ -542,11 +540,12 @@ def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = Fa
     """
     Replace the monthly total immediately after the week-4 subtotal, or after
     the month's final transaction when no week-4 subtotal exists.
+    Jika force=True, guard tanggal dilewati.
     """
     with _PERIOD_LOCK:
         boundaries = get_period_boundaries(year, month)
         monthly_period = next(p for p in boundaries if p.kind == "month")
-        if now_tz().date() < monthly_period.end_date:
+        if not force and now_tz().date() < monthly_period.end_date:
             return compute_period_total(sheet_name, monthly_period)
         week4_period = boundaries[3]
         ensure_sorted(sheet_name, monthly_period)
@@ -576,6 +575,8 @@ def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = Fa
                 latest_transaction_row = _last_row_before_period(sheet_name, values, monthly_period)
             else:
                 latest_transaction_row = columns["header"] + 1
+        if latest_transaction_row is None or latest_transaction_row < columns["header"] + 1:
+            latest_transaction_row = columns["header"] + 1
 
         week4_total_rows = [
             index + 1 for index, row in enumerate(values)
@@ -583,9 +584,12 @@ def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = Fa
             and _subtotal_label(row, description_index) == week4_period.label
         ]
         insert_after = max(week4_total_rows) if week4_total_rows else latest_transaction_row
+        if insert_after is None or insert_after < columns["header"] + 1:
+            insert_after = columns["header"] + 1
         new_row = _build_total_row(sheet_name, monthly_period, total)
         sheet_repo.insert_rows_after(sheet_name, insert_after, [new_row])
         return total
+
 
 def process_all_units_period(year: int, month: int,
                              period_kind: Literal["week", "month"] = "week",

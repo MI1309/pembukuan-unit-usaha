@@ -83,8 +83,8 @@ class Config:
         return self.UNIT_USAHA
 
     # Rekap Otomatis
-    RECAP_ENABLED = True
-    RECAP_LAZY_TRIGGER_ENABLED = True
-    RECAP_BOUNDARY_DAYS = [7, 14, 21]
+    RECAP_ENABLED: bool = True
+    RECAP_LAZY_TRIGGER_ENABLED: bool = True
+    RECAP_BOUNDARY_DAYS: list[int] = [7, 14, 21]
 
 config = Config()

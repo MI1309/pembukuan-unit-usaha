@@ -1540,13 +1540,26 @@ def format_total_row(sheet_name: str, row_index: int) -> None:
         return
 
     is_daily_detail = sheet_name == "(2)Rincian Transaksi Harian"
-    end_column_index = 8 if is_daily_detail else 9
+    # Ledger unit layout (10 kolom):
+    #   0=Nomor, 1=Tanggal, 2=Nama Barang, 3=Keterangan, 4=Kuantitas,
+    #   5=Satuan, 6=Pemasukan, 7=Pengeluaran, 8=Sisa Saldo, 9=Transaction ID
+    # Rincian Harian layout (8 kolom):
+    #   0=Tanggal, 1=Nama Produk, 2=Keterangan, 3=Kuantitas,
+    #   4=Satuan, 5=Pemasukan, 6=Pengeluaran, 7=Transaction ID
+    if is_daily_detail:
+        end_column_index = 8
+        label_column_index = 2
+        currency_start, currency_end = 5, 7
+    else:
+        end_column_index = 9
+        label_column_index = 3
+        currency_start, currency_end = 6, 9
+
     background = (
         {"red": 0.82, "green": 0.91, "blue": 0.84}
         if label.startswith("TOTAL BULAN")
         else {"red": 1.0, "green": 0.94, "blue": 0.72}
     )
-    label_column_index = 2
     requests = [
         {
             "repeatCell": {
@@ -1587,8 +1600,8 @@ def format_total_row(sheet_name: str, row_index: int) -> None:
                     "sheetId": worksheet.id,
                     "startRowIndex": row_index - 1,
                     "endRowIndex": row_index,
-                    "startColumnIndex": 5,
-                    "endColumnIndex": 7,
+                    "startColumnIndex": currency_start,
+                    "endColumnIndex": currency_end,
                 },
                 "cell": {"userEnteredFormat": {
                     "horizontalAlignment": "RIGHT",
@@ -1597,39 +1610,21 @@ def format_total_row(sheet_name: str, row_index: int) -> None:
                 "fields": "userEnteredFormat.horizontalAlignment,userEnteredFormat.numberFormat",
             }
         },
-    ]
-    if not is_daily_detail:
-        requests.append({
-            "repeatCell": {
+        {
+            "updateDimensionProperties": {
                 "range": {
                     "sheetId": worksheet.id,
-                    "startRowIndex": row_index - 1,
-                    "endRowIndex": row_index,
-                    "startColumnIndex": 7,
-                    "endColumnIndex": 8,
+                    "dimension": "COLUMNS",
+                    "startIndex": label_column_index,
+                    "endIndex": label_column_index + 1,
                 },
-                "cell": {"userEnteredFormat": {
-                    "horizontalAlignment": "RIGHT",
-                    "numberFormat": {"type": "CURRENCY", "pattern": '"Rp" #,##0'},
-                }},
-                "fields": "userEnteredFormat.horizontalAlignment,userEnteredFormat.numberFormat",
+                "properties": {"pixelSize": 360},
+                "fields": "pixelSize",
             }
-        })
-    requests.append({
-        "updateDimensionProperties": {
-            "range": {
-                "sheetId": worksheet.id,
-                "dimension": "COLUMNS",
-                "startIndex": label_column_index,
-                "endIndex": label_column_index + 1,
-            },
-            "properties": {"pixelSize": 360},
-            "fields": "pixelSize",
-        }
-    })
+        },
+    ]
     _retry_google_call(worksheet.spreadsheet.batch_update, {"requests": requests})
     invalidate_cache(sheet_name)
-
 
 @retry_google_api()
 def rewrite_period_block(sheet_name: str, start_row: int, end_row: int, new_rows: list[list]) -> None:

@@ -260,6 +260,7 @@ def duplicate_copy_message(sale: dict) -> str:
     )
 
 
+# proses penjualan utama
 def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tuple[bool, str, dict | None]:
     parsed = analyze_sales(message)
     raw_items = parsed.get("transaksi", []) if isinstance(parsed, dict) else []
@@ -311,6 +312,13 @@ def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tu
         except Exception as error:
             failed.extend(f"{sale['produk']} — {error}" for sale in prepared)
 
+    if saved:
+        try:
+            _refresh_current_period_totals(now_tz(), trigger_source="sales")
+            _lazy_trigger_recap(now_tz(), trigger_source="sales")
+        except Exception as recap_error:
+            logger.warning("recap trigger from process_sales failed: %s", recap_error)
+
     lines = []
     if saved:
         transaction_types = {sale.get("is_penjualan", True) for sale in saved}
@@ -337,7 +345,6 @@ def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tu
         if len(failed) > 10:
             lines.append(f"... dan {len(failed) - 10} baris gagal lainnya")
     return True, "\n".join(lines), {"saved": len(saved), "duplicates": duplicates}
-
 
 def _parse_date(value) -> date | None:
     if isinstance(value, datetime):
@@ -700,7 +707,9 @@ def help_copy_messages() -> list[str]:
 
 
 def _lazy_trigger_recap(now: datetime, trigger_source: str) -> None:
-    """Lazy trigger for periodic totals, launched from webhook router."""
+    """Lazy trigger for periodic totals, launched from process_sales or webhook router.
+    Memproses semua periode (minggu & bulan) yang sudah berakhir di bulan ini
+    dan bulan lalu yang belum punya flag recap_done di _Meta."""
     if not getattr(config, "RECAP_ENABLED", True):
         return
 
@@ -724,7 +733,7 @@ def _lazy_trigger_recap(now: datetime, trigger_source: str) -> None:
                 except ValueError:
                     pass
 
-                _process_recap_period(year, month, period.kind, period.label)
+                _process_recap_period(year, month, period.kind, period.label, force=False)
                 sheet_repo._write_archive_manifest(
                     meta_key,
                     {"done_at": now.isoformat(), "source": trigger_source},
@@ -738,41 +747,58 @@ def _lazy_trigger_recap(now: datetime, trigger_source: str) -> None:
         logger.warning("lazy recap failed: %s", e)
 
 
-def _process_recap_period(year: int, month: int, kind: str, label: str) -> None:
+def _process_recap_period(year: int, month: int, kind: str, label: str, force: bool = False) -> None:
+    boundaries = periodic_total_service.get_period_boundaries(year, month)
     if kind == "week":
-        period = next(
-            period for period in periodic_total_service.get_period_boundaries(year, month)
-            if period.label == label
-        )
-        week_index = periodic_total_service.get_period_boundaries(year, month).index(period) + 1
+        period = next(p for p in boundaries if p.label == label)
+        week_index = boundaries.index(period) + 1
         results = periodic_total_service.process_all_units_period(
-            year, month, period_kind="week", week_index=week_index,
+            year, month, period_kind="week", week_index=week_index, force=force,
         )
     else:
-        results = periodic_total_service.process_all_units_period(year, month, period_kind="month")
+        results = periodic_total_service.process_all_units_period(
+            year, month, period_kind="month", force=force,
+        )
     failures = [unit for unit, result in results.items() if isinstance(result, Exception)]
     if failures:
         raise RuntimeError(f"recap failed for {label}, units: {', '.join(failures)}")
 
-
 def _refresh_current_period_totals(now: datetime, trigger_source: str) -> None:
+    """Update subtotal minggu berjalan dan/atau total bulan berjalan secara
+    real-time setiap ada transaksi baru. Tidak memakai flag _Meta karena
+    tujuannya update kontinu, bukan finalisasi sekali."""
     if not getattr(config, "RECAP_ENABLED", True):
         return
-    periods = periodic_total_service.get_period_boundaries(now.year, now.month)
-    closed_weeks = [
-        period for period in periods
-        if period.kind == "week" and period.end_date == now.date()
-    ]
-    month_period = periods[-1]
-    if not closed_weeks and month_period.end_date != now.date():
-        return
-    for period in closed_weeks:
-        _process_recap_period(now.year, now.month, "week", period.label)
-    if month_period.end_date == now.date():
-        _process_recap_period(now.year, now.month, "month", month_period.label)
-    logger.info(
-        "closed-period totals refreshed by %s for %s",
-        trigger_source, ", ".join(period.label for period in closed_weeks + (
-            [month_period] if month_period.end_date == now.date() else []
-        )),
+
+    today = now.date()
+    boundaries = periodic_total_service.get_period_boundaries(today.year, today.month)
+    current_week = next(
+        (p for p in boundaries if p.kind == "week" and p.start_date <= today <= p.end_date),
+        None,
     )
+    month_period = boundaries[-1]
+    processed = []
+
+    if current_week is not None:
+        try:
+            _process_recap_period(
+                today.year, today.month, "week", current_week.label, force=True,
+            )
+            processed.append(current_week.label)
+        except Exception as e:
+            logger.warning("refresh current week failed: %s", e)
+
+    if month_period.start_date <= today <= month_period.end_date:
+        try:
+            _process_recap_period(
+                today.year, today.month, "month", month_period.label, force=True,
+            )
+            processed.append(month_period.label)
+        except Exception as e:
+            logger.warning("refresh current month failed: %s", e)
+
+    if processed:
+        logger.info(
+            "current-period totals refreshed by %s for %s",
+            trigger_source, ", ".join(processed),
+        )

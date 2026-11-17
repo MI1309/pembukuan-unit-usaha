@@ -306,6 +306,98 @@ def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tu
                 ), {"duplicates": duplicates}
             _maybe_archive_unit_transactions(prepared[0]["tanggal"])
             _maybe_archive_daily_detail(prepared[0]["tanggal"])
+            
+            rows = [row for sale in prepared for row in _save_sale(sale)]
+            sheet_repo.append_rows_atomically(rows)
+            
+            # --- TAMBAHAN BARU: URUTKAN SELURUH TRANSAKSI BERDASARKAN TANGGAL ---
+            # Agar transaksi tanggal 1-7 tidak nyangkut di bawah transaksi tanggal 11-14
+            units_affected = set(sale["unit"] for sale in prepared)
+            units_affected.add("(2)Rincian Transaksi Harian")
+            for unit_name in units_affected:
+                sheet_repo.sort_sheet_rows(unit_name)
+            # ---------------------------------------------------------------------
+            
+            saved.extend(prepared)
+        except Exception as error:
+            failed.extend(f"{sale['produk']} — {error}" for sale in prepared)
+
+    if saved:
+        try:
+            _refresh_saved_periods(saved, "sales")
+        except Exception as recap_error:
+            logger.warning("recap trigger from process_sales failed: %s", recap_error)
+
+    lines = []
+    if saved:
+        transaction_types = {sale.get("is_penjualan", True) for sale in saved}
+        heading = "PENJUALAN / PEMASUKAN" if transaction_types == {True} else (
+            "PEMBELIAN / PENGELUARAN" if transaction_types == {False} else "TRANSAKSI"
+        )
+        lines += [f"✅ *{len(saved)} {heading} BERHASIL DISIMPAN*", "━━━━━━━━━━━━━━━━━━"]
+        total = sum(sale["penjualan"] for sale in saved)
+        if len(saved) <= 8:
+            for index, sale in enumerate(saved, start=1):
+                amount_label = "Pemasukan" if sale.get("is_penjualan", True) else "Pengeluaran"
+                quantity_text = f"{sale['kuantitas']:g} {sale['unit_kuantitas']} → " if sale["kuantitas"] > 0 else ""
+                lines += [f"{index}. *{sale['produk']}*",
+                          f"   📅 {format_tanggal_id(datetime.combine(sale['tanggal'], datetime.min.time()))}",
+                          f"   ⚖️ {quantity_text}💰 {amount_label}: {format_rupiah(sale['penjualan'])}"]
+        else:
+            lines.append(f"🧾 {len(saved)} transaksi dicatat. Cek rekap untuk rincian.")
+        lines += ["━━━━━━━━━━━━━━━━━━", f"💰 *Total transaksi: {format_rupiah(total)}*"]
+    if failed:
+        if saved:
+            lines.append("")
+        lines.append(f"⚠️ *{len(failed)} BARIS TIDAK DISIMPAN*")
+        lines.extend(f"• {error}" for error in failed[:10])
+        if len(failed) > 10:
+            lines.append(f"... dan {len(failed) - 10} baris gagal lainnya")
+    return True, "\n".join(lines), {"saved": len(saved), "duplicates": duplicates}
+    parsed = analyze_sales(message)
+    raw_items = parsed.get("transaksi", []) if isinstance(parsed, dict) else []
+    prepared = []
+    failed = []
+    for raw in raw_items:
+        sale, error = _normalise_sale(raw, message)
+        if error:
+            failed.append(error)
+        elif sale:
+            quantity_text = f"{sale['kuantitas']:g} {sale['unit_kuantitas']}".strip()
+            sale["transaction_id"] = generate_transaction_id(
+                sender, sale["tanggal"], sale["produk"], quantity_text,
+                sale["penjualan"], sale["keterangan"], sale["unit"],
+            )
+            prepared.append(sale)
+    if not prepared and not failed:
+        return False, "", None
+
+    large_sales = [sale for sale in prepared if sale["penjualan"] >= config.CONFIRM_THRESHOLD]
+    if large_sales and not confirmed:
+        return True, _confirm_text(large_sales[0]), {"pending": True}
+
+    saved = []
+    duplicates = []
+    with _SALES_LOCK:
+        try:
+            tx_ids = [sale["transaction_id"] for sale in prepared]
+            sheet_names = list(dict.fromkeys(
+                [sale["unit"] for sale in prepared] + ["(2)Rincian Transaksi Harian"]
+            ))
+            existing = sheet_repo.find_transaction_ids(sheet_names, tx_ids)
+            duplicates = [sale for sale in prepared if existing.get(sale["transaction_id"])]
+            for sale in duplicates:
+                from app.services.webhook_state import log_event
+                log_event(sender, message, "DUPLICATE_SKIPPED", invoice=sale["transaction_id"])
+            prepared = [sale for sale in prepared if not existing.get(sale["transaction_id"])]
+            if not prepared:
+                duplicate_id = duplicates[0]["transaction_id"]
+                return False, (
+                    f"⚠️ Transaksi sudah tercatat sebelumnya (ID: {duplicate_id}). "
+                    "Saya sertakan pesan yang bisa diteruskan."
+                ), {"duplicates": duplicates}
+            _maybe_archive_unit_transactions(prepared[0]["tanggal"])
+            _maybe_archive_daily_detail(prepared[0]["tanggal"])
             rows = [row for sale in prepared for row in _save_sale(sale)]
             sheet_repo.append_rows_atomically(rows)
             saved.extend(prepared)

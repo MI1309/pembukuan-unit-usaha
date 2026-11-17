@@ -11,7 +11,7 @@ from app.services import sales_service
 from app.services import karyawan_service, payroll_service
 from app.services import backup_service
 from app.services import webhook_state
-from app.services.setup_service import init_all_sheets # Import fungsi di atas
+from app.services.setup_service import init_all_sheets
 
 router = APIRouter()
 
@@ -95,13 +95,14 @@ async def _webhook_payload(request: Request) -> dict:
             value[key] = item
     return value
 
-# Tambahkan endpoint setup untuk inisialisasi sheets
+
 def _first_value(payload: dict, *keys: str) -> str:
     for key in keys:
         value = payload.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()
     return ""
+
 
 # route webhook 
 @router.post("/webhook")
@@ -113,6 +114,7 @@ async def fonnte_webhook(request: Request):
 @router.get("/webhook")
 def webhook_health_check():
     return {"status": "ok", "message": "Webhook endpoint aktif"}
+
 
 # proses payload webhook
 def process_webhook_payload(data: dict) -> dict:
@@ -130,7 +132,6 @@ def process_webhook_payload(data: dict) -> dict:
         
         if sender and webhook_state.is_rate_limited(sender):
             metrics.increment("webhook_rate_limited", {"sender": sender})
-            # Skip WA reply if heavily limited or spammy to save quota
             return {"status": "rate_limited"}
 
         # 2. Validasi secret
@@ -155,7 +156,7 @@ def process_webhook_payload(data: dict) -> dict:
         if staff and backup_command:
             authorized = True
             _trigger_lazy_recap(message, staff, "admin")
-            # proses perintah backup manual
+            
             result = backup_service.manual_backup()
             if result["status"] == "success":
                 reply = f"✅ Backup berhasil dibuat:\n{result['name']}"
@@ -239,8 +240,7 @@ def process_webhook_payload(data: dict) -> dict:
                 return {"status": "duplicate"}
             if is_sale:
                 send_whatsapp(sender, reply)
-                if (state or {}).get("saved", 0) > 0 and getattr(config, "RECAP_LAZY_TRIGGER_ENABLED", True):
-                    _start_background_recap(_safe_refresh_current_totals, "transaction_saved")
+                # [DIHAPUS] Pemanggilan _safe_refresh_current_totals di sini agar tidak error
                 if duplicates:
                     _send_duplicate_reply(
                         sender,
@@ -249,6 +249,7 @@ def process_webhook_payload(data: dict) -> dict:
                     )
             webhook_state.log_event(sender, "YA (konfirmasi)", "CONFIRMED")
             return {"status": "confirmed"}
+            
         if pending_message and re.fullmatch(r"(batal|tidak|no)", message, re.I):
             webhook_state.clear_pending_confirmation(sender)
             send_whatsapp(sender, "❌ Transaksi dibatalkan.")
@@ -269,9 +270,9 @@ def process_webhook_payload(data: dict) -> dict:
             send_whatsapp(sender, reply)
             webhook_state.log_event(sender, message, "PENDING_CONFIRM")
             return {"status": "pending_confirm"}
+            
         send_whatsapp(sender, reply)
-        if (state or {}).get("saved", 0) > 0 and getattr(config, "RECAP_LAZY_TRIGGER_ENABLED", True):
-            _start_background_recap(_safe_refresh_current_totals, "transaction_saved")
+        # [DIHAPUS] Pemanggilan _safe_refresh_current_totals di sini agar tidak error
         if duplicates:
             _send_duplicate_reply(
                 sender,

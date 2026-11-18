@@ -29,12 +29,6 @@ class PeriodTotal:
     sisa_saldo_akhir: int
 
 def get_period_boundaries(year: int, month: int) -> list[Period]:
-    """Return 5 Period: 4 minggu + 1 bulan (kind='month').
-    Minggu 1: tgl 1-7
-    Minggu 2: tgl 8-14
-    Minggu 3: tgl 15-21
-    Minggu 4: tgl 22-akhir bulan
-    """
     _, last_day = calendar.monthrange(year, month)
     
     def get_month_name(y, m):
@@ -45,13 +39,7 @@ def get_period_boundaries(year: int, month: int) -> list[Period]:
     year_str = str(year)
 
     periods = []
-    
-    week_configs = [
-        (1, 7, 1),
-        (8, 14, 2),
-        (15, 21, 3),
-        (22, last_day, 4)
-    ]
+    week_configs = [(1, 7, 1), (8, 14, 2), (15, 21, 3), (22, last_day, 4)]
     
     for start, end, idx in week_configs:
         label = f"SUBTOTAL MINGGU {idx} ({start:02d}-{end:02d} {month_label} {year_str})"
@@ -73,7 +61,6 @@ def get_period_boundaries(year: int, month: int) -> list[Period]:
     return periods
 
 def get_period_for_date(target: date) -> Period:
-    """Return Period (minggu) yang mencakup tanggal tsb."""
     boundaries = get_period_boundaries(target.year, target.month)
     for p in boundaries:
         if p.kind == "week" and p.start_date <= target <= p.end_date:
@@ -81,7 +68,6 @@ def get_period_for_date(target: date) -> Period:
     return boundaries[3]
 
 def is_subtotal_row(row: list) -> bool:
-    """Recognize subtotal labels in current and legacy ledger layouts."""
     return any(
         _clean_subtotal_label(value).upper().startswith(("SUBTOTAL MINGGU", "TOTAL BULAN"))
         for value in row
@@ -117,28 +103,22 @@ def _column_indices(sheet_name: str, values: list[list]) -> dict[str, int | None
         "expense": find_column("pengeluaran (rp)", "pengeluaran") if normalized else None,
         "balance": find_column("sisa saldo", "saldo") if normalized else None,
         "description": find_column("keterangan transaksi", "keterangan"),
-        "tx_id": find_column("transaction id"),
+        "tx_id": find_column("transaction id", "transaction_id"),
         "daily": is_daily,
     }
 
 def _resolved_columns(sheet_name: str, values: list[list]) -> dict[str, int | None]:
     columns = _column_indices(sheet_name, values)
-    if columns["income"] is None:
-        columns["income"] = 5
-    if columns["expense"] is None:
-        columns["expense"] = 6
-    if columns["balance"] is None and not columns["daily"]:
-        columns["balance"] = 7
-    if columns["description"] is None:
-        columns["description"] = 2
-    if columns["tx_id"] is None:
-        columns["tx_id"] = 7 if columns["daily"] else 8
+    if columns["income"] is None: columns["income"] = 6 if columns["daily"] else 7
+    if columns["expense"] is None: columns["expense"] = 7 if columns["daily"] else 8
+    if columns["balance"] is None and not columns["daily"]: columns["balance"] = 9
+    if columns["description"] is None: columns["description"] = 2 if columns["daily"] else 3
+    if columns["tx_id"] is None: columns["tx_id"] = 5 if columns["daily"] else 6
     return columns
 
 def _parse_ledger_date(value):
     parsed = parse_date(value)
-    if parsed:
-        return parsed
+    if parsed: return parsed
     text = str(value or "").strip()
     if re.fullmatch(r"\d{8}", text):
         try:
@@ -149,24 +129,20 @@ def _parse_ledger_date(value):
 
 def _row_transaction_date(row: list, date_index: int) -> date | None:
     parsed = _parse_ledger_date(row[date_index] if len(row) > date_index else "")
-    if parsed:
-        return parsed
+    if parsed: return parsed
     for index in range(date_index + 1, len(row)):
         if any(str(value).strip() for value in row[date_index:index]):
             break
         parsed = _parse_ledger_date(row[index])
-        if parsed:
-            return parsed
+        if parsed: return parsed
     return None
 
 def compute_period_total(sheet_name: str, period: Period) -> PeriodTotal:
     worksheet = sheet_repo.get_sheet(sheet_name, create=False)
-    if not worksheet:
-        return PeriodTotal(period, 0, 0, 0)
+    if not worksheet: return PeriodTotal(period, 0, 0, 0)
     
     values = worksheet.get_all_values()
-    if not values:
-        return PeriodTotal(period, 0, 0, 0)
+    if not values: return PeriodTotal(period, 0, 0, 0)
     
     columns = _resolved_columns(sheet_name, values)
     total_pemasukan = 0
@@ -178,15 +154,11 @@ def compute_period_total(sheet_name: str, period: Period) -> PeriodTotal:
     last_period_date = None
     
     for row_index, row in enumerate(values):
-        if row_index <= columns["header"]:
-            continue
-        if is_subtotal_row(row):
-            continue
+        if row_index <= columns["header"] or is_subtotal_row(row): continue
 
         date_index = columns["date"] or 0
         row_date = _row_transaction_date(row, date_index)
-        if not row_date:
-            continue
+        if not row_date: continue
 
         income_index = columns["income"]
         expense_index = columns["expense"]
@@ -214,96 +186,83 @@ def compute_period_total(sheet_name: str, period: Period) -> PeriodTotal:
 
 def _build_total_row(sheet_name: str, period: Period, total: PeriodTotal) -> list:
     if sheet_name == "(2)Rincian Transaksi Harian":
+        # Rincian Harian: Tanggal, Nama, Ket, Qty, Satuan, transaction_id, Pemasukan, Pengeluaran
         return [
-            "", "", period.label, "", "",
-            total.pemasukan, total.pengeluaran, "",
+            "", "", period.label, "", "", "",
+            total.pemasukan, total.pengeluaran,
         ]
+    
+    # 5 Unit Usaha: Nomor, Tgl, Nama, Ket, Qty, Satuan, transaction_id, Pemasukan, Pengeluaran, Saldo
     return [
-        "",
-        period.end_date.strftime("%Y-%m-%d"),
-        "",
-        period.label,
-        "", "",
-        total.pemasukan,
-        total.pengeluaran,
-        total.pemasukan - total.pengeluaran,
-        "",
+        "",                                           # 0: Nomor
+        period.end_date.strftime("%Y-%m-%d"),          # 1: Tanggal
+        "",                                           # 2: Nama
+        period.label,                                 # 3: Keterangan
+        "",                                           # 4: Kuantitas
+        "",                                           # 5: Satuan
+        "",                                           # 6: transaction_id
+        total.pemasukan,                              # 7: Pemasukan
+        total.pengeluaran,                            # 8: Pengeluaran
+        total.sisa_saldo_akhir,                       # 9: Sisa Saldo
     ]
 
 def rebuild_sheet_with_totals(sheet_name: str) -> None:
-    """FUNGSI SAKTI HEMAT KUOTA: 
-    Membangun ulang seluruh baris data, menyortir tanggal, 
-    menambahkan subtotal, dan menerapkan styling warna."""
     with _PERIOD_LOCK:
         worksheet = sheet_repo.get_sheet(sheet_name, create=False)
-        if not worksheet:
-            return
+        if not worksheet: return
             
-        values = worksheet.get_all_values() # 1 READ
-        if not values:
-            return
+        values = worksheet.get_all_values()
+        if not values: return
             
         columns = _resolved_columns(sheet_name, values)
         header_idx = columns["header"]
-        if header_idx < 0:
-            return
+        if header_idx < 0: return
             
         data_rows = values[header_idx + 1:]
         
-        # 1. Bersihkan baris kosong & buang subtotal lama
         clean_rows = []
         for row in data_rows:
-            if not any(str(cell).strip() for cell in row):
-                continue
-            if is_subtotal_row(row):
-                continue
+            if not any(str(cell).strip() for cell in row): continue
+            if is_subtotal_row(row): continue
             clean_rows.append(row)
             
-        # 2. Sortir berdasarkan Tanggal
-        date_idx = columns["date"] if columns["date"] is not None else 0
+        date_idx = columns["date"] if columns["date"] is not None else 1
         tx_idx = columns["tx_id"]
         clean_rows.sort(key=lambda r: (
             _row_transaction_date(r, date_idx) or date(9999, 12, 31),
             str(r[tx_idx]).strip() if tx_idx is not None and tx_idx < len(r) else ""
         ))
         
-        # 3. Bangun ulang baris dengan subtotal
         months_data = defaultdict(list)
         for row in clean_rows:
             d = _row_transaction_date(row, date_idx)
-            if d:
-                months_data[f"{d.year}-{d.month:02d}"].append(row)
+            if d: months_data[f"{d.year}-{d.month:02d}"].append(row)
                 
         final_rows = []
-        total_row_indices = [] # Untuk menyimpan baris mana saja yang perlu diberi warna
+        total_row_indices = []
         
         for month_key, month_rows in sorted(months_data.items()):
             year, month = map(int, month_key.split("-"))
             boundaries = get_period_boundaries(year, month)
             
-            # Iterasi minggu 1-4
             for p in boundaries:
-                if p.kind != "week":
-                    continue
+                if p.kind != "week": continue
                 week_rows = [r for r in month_rows if p.start_date <= _row_transaction_date(r, date_idx) <= p.end_date]
                 if week_rows:
                     final_rows.extend(week_rows)
                     
-                    # Hitung total minggu di memori
                     t_pemasukan = sum(parse_amount(r[columns["income"]]) for r in week_rows if columns["income"] is not None and len(r) > columns["income"] and r[columns["income"]] != "")
                     t_pengeluaran = sum(parse_amount(r[columns["expense"]]) for r in week_rows if columns["expense"] is not None and len(r) > columns["expense"] and r[columns["expense"]] != "")
                     saldo = parse_amount(week_rows[-1][columns["balance"]]) if columns["balance"] is not None and len(week_rows[-1]) > columns["balance"] else 0
                     
                     p_total = PeriodTotal(p, t_pemasukan, t_pengeluaran, saldo)
                     final_rows.append(_build_total_row(sheet_name, p, p_total))
-                    total_row_indices.append(len(final_rows)) # Tandai index baris subtotal
+                    total_row_indices.append(len(final_rows))
                     
-            # --- PERBAIKAN GRAND TOTAL: Cek tanggal terakhir transaksi di bulan ini ---
             month_p = boundaries[-1]
             month_dates = [_row_transaction_date(r, date_idx) for r in month_rows if _row_transaction_date(r, date_idx)]
             last_tx_date = max(month_dates) if month_dates else None
             
-            # Tampilkan Total Bulan JIKA transaksi terakhir sudah mencapai akhir bulan, ATAU sekarang sudah lewat akhir bulan
             if (last_tx_date and last_tx_date >= month_p.end_date) or (now_tz().date() >= month_p.end_date):
                 t_pemasukan = sum(parse_amount(r[columns["income"]]) for r in month_rows if columns["income"] is not None and len(r) > columns["income"] and r[columns["income"]] != "")
                 t_pengeluaran = sum(parse_amount(r[columns["expense"]]) for r in month_rows if columns["expense"] is not None and len(r) > columns["expense"] and r[columns["expense"]] != "")
@@ -311,26 +270,21 @@ def rebuild_sheet_with_totals(sheet_name: str) -> None:
                 
                 m_total = PeriodTotal(month_p, t_pemasukan, t_pengeluaran, saldo)
                 final_rows.append(_build_total_row(sheet_name, month_p, m_total))
-                total_row_indices.append(len(final_rows)) # Tandai index baris grand total
-            # -----------------------------------------------------------------------------
+                total_row_indices.append(len(final_rows))
                 
-        # 4. Tulis ulang (1 WRITE)
         start_row = header_idx + 2
         end_row = start_row + len(final_rows) - 1
         
         if len(final_rows) > 0:
             sheet_repo.rewrite_period_block(sheet_name, start_row, end_row, final_rows)
             
-            # --- Terapkan Style (Warna Kuning/Hijau) ke baris Subtotal & Total ---
             for rel_idx in total_row_indices:
                 abs_row_index = start_row + rel_idx - 1
                 try:
                     sheet_repo.format_total_row(sheet_name, abs_row_index)
                 except Exception as e:
                     logger.warning(f"Gagal format baris total {sheet_name} row {abs_row_index}: {e}")
-            # ---------------------------------------------------------------------------------
             
-            # Hapus sisa baris lama jika data baru lebih pendek
             if len(final_rows) < len(data_rows):
                 to_delete = list(range(end_row + 1, start_row + len(data_rows)))
                 if to_delete:
@@ -338,34 +292,21 @@ def rebuild_sheet_with_totals(sheet_name: str) -> None:
         elif len(final_rows) == 0 and len(data_rows) > 0:
             to_delete = list(range(start_row, start_row + len(data_rows)))
             sheet_repo.delete_rows_bottom_up(sheet_name, to_delete)
-            
+
 # ==============================================================================
-# FUNGSI LAMA (Dipertahankan untuk kompatibilitas, tapi tidak dipakai di alur utama)
+# FUNGSI YANG KETINGGALAN (INI PENYEBAB ERRORNYA)
 # ==============================================================================
-
-def ensure_sorted(sheet_name: str, period: Period) -> bool:
-    return False
-
-def write_period_total(sheet_name: str, period: Period, force: bool = False) -> PeriodTotal:
-    return compute_period_total(sheet_name, period)
-
-def write_monthly_total(sheet_name: str, year: int, month: int, force: bool = False) -> PeriodTotal:
-    boundaries = get_period_boundaries(year, month)
-    monthly_period = next(p for p in boundaries if p.kind == "month")
-    return compute_period_total(sheet_name, monthly_period)
-    
-def process_all_units_period(year: int, month: int,
-                             period_kind: Literal["week", "month"] = "week",
-                             week_index: int | None = None,
-                             force: bool = False,
-                             unit_names: list[str] | None = None) -> dict:
+def rebuild_all_sheets_with_totals() -> dict:
+    """Merombak dan menghitung ulang 5 unit usaha + Rincian Harian sekaligus."""
+    units = list(config.UNIT_USAHA) + ["(2)Rincian Transaksi Harian"]
     results = {}
-    units = unit_names if unit_names is not None else config.UNIT_USAHA
+    
     for unit in units:
         try:
             rebuild_sheet_with_totals(unit)
-            results[unit] = True
+            results[unit] = "Sukses"
         except Exception as e:
-            logger.error(f"Failed to process periodic total for unit {unit}: {e}")
-            results[unit] = e
+            logger.error(f"Gagal rebuild {unit}: {e}")
+            results[unit] = str(e)
+            
     return results

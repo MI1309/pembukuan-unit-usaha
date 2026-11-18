@@ -217,21 +217,37 @@ def _save_sale(sale: dict) -> list[tuple[str, list]]:
     expense = "" if is_sale else sale["penjualan"]
     balance_change = sale["penjualan"] if is_sale else -sale["penjualan"]
     quantity_text = f"{sale['kuantitas']:g} {sale['unit_kuantitas']}".strip()
+    
+    # Unit Usaha: 10 Kolom (transaction_id sebelum Pemasukan)
     unit_row = [
-        sale["tanggal"], sale["produk"],
-        sale["keterangan"], quantity_text, sale["satuan"],
-        income, expense, balance_change, sale["transaction_id"],
+        "",                      # 0: Nomor
+        sale["tanggal"],         # 1: Tanggal
+        sale["produk"],          # 2: Nama
+        sale["keterangan"],      # 3: Keterangan
+        quantity_text,           # 4: Kuantitas
+        sale["satuan"],          # 5: Satuan
+        sale["transaction_id"],  # 6: transaction_id
+        income,                  # 7: Pemasukan
+        expense,                 # 8: Pengeluaran
+        balance_change           # 9: Sisa Saldo
     ]
+    
+    # Rincian Harian: 8 Kolom (transaction_id geser ke index 5, hapus Sisa Saldo)
     daily_detail_row = [
-        sale["tanggal"], sale["produk"], sale["keterangan"],
-        quantity_text, sale["satuan"], income, expense,
-        sale["transaction_id"],
+        sale["tanggal"],         # 0: Tanggal
+        sale["produk"],          # 1: Nama Produk
+        sale["keterangan"],      # 2: Keterangan
+        quantity_text,           # 3: Kuantitas
+        sale["satuan"],          # 4: Satuan
+        sale["transaction_id"],  # 5: transaction_id
+        income,                  # 6: Pemasukan
+        expense,                 # 7: Pengeluaran
     ]
+    
     return [
         (sale["unit"], unit_row),
         ("(2)Rincian Transaksi Harian", daily_detail_row),
     ]
-
 
 def _confirm_text(sale: dict) -> str:
     return (

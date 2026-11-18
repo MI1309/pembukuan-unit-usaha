@@ -271,7 +271,6 @@ def duplicate_copy_message(sale: dict) -> str:
         f"ID transaksi: {sale['transaction_id']}\n"
         "Status: transaksi ini sudah tercatat, tidak perlu dicatat ulang."
     )
-
 def _parse_pipe_local(line: str) -> dict | None:
     """Mem-parsing format pipa lokal tanpa membuang kuota Groq AI."""
     parts = [p.strip() for p in line.split("|")]
@@ -292,9 +291,22 @@ def _parse_pipe_local(line: str) -> dict | None:
     
     harga_satuan = parts[3]
     
+    unit_usaha = ""
     tanggal = ""
-    if len(parts) >= 5:
-        tanggal = parts[4].replace("tanggal", "").replace("tgl", "").strip()
+    
+    # --- PERBAIKAN: Membaca Unit & Tanggal secara dinamis ---
+    for p in parts[4:]:
+        p_lower = p.lower()
+        if p_lower.startswith("unit "):
+            unit_usaha = p[5:].strip()
+        elif p_lower.startswith("tanggal ") or p_lower.startswith("tgl "):
+            tanggal = re.sub(r"^(tanggal|tgl)\s+", "", p, flags=re.IGNORECASE).strip()
+        else:
+            # Jika tidak pakai awalan 'unit' atau 'tanggal', cek apakah formatnya tanggal
+            if re.match(r"\d{4}-\d{2}-\d{2}", p):
+                tanggal = p
+            else:
+                unit_usaha = p
 
     return {
         "is_penjualan": is_penjualan,
@@ -303,9 +315,9 @@ def _parse_pipe_local(line: str) -> dict | None:
         "kuantitas": kuantitas,
         "satuan": satuan,
         "harga_satuan": harga_satuan,
+        "unit_usaha": unit_usaha,
         "tanggal": tanggal
     }
-
 
 def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tuple[bool, str, dict | None]:
     import time

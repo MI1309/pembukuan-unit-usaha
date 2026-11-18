@@ -401,8 +401,8 @@ def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tu
                     "Saya sertakan pesan yang bisa diteruskan."
                 ), {"duplicates": duplicates}
                 
-            _maybe_archive_unit_transactions(prepared[0]["tanggal"])
-            _maybe_archive_daily_detail(prepared[0]["tanggal"])
+            # Pengarsipan bulanan kini ditangani terjadwal via cron job (/api/cron/archive)
+            # agar alur chat WhatsApp ringan, cepat, dan tidak menghabiskan kuota 429
             
             rows = [row for sale in prepared for row in _save_sale(sale)]
             sheet_repo.append_rows_atomically(rows)

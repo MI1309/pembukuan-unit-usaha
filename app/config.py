@@ -19,6 +19,7 @@ class Config:
     FONNTE_TOKEN = os.getenv("FONNTE_TOKEN")
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+    CRON_SECRET = os.getenv("CRON_SECRET")
     
     # Endpoint API
     FONNTE_URL = "https://api.fonnte.com/send"

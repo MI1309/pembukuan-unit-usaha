@@ -302,6 +302,150 @@ def setup_unit_sheet_layout(sheet_name: str) -> None:
     sheet_repo._retry_google_call(worksheet.spreadsheet.batch_update, {"requests": requests})
     sheet_repo.invalidate_cache(sheet_name)
 
+
+def setup_rincian_sheet_layout() -> None:
+    """Setup Title (baris 1-3) dan Header (baris 5) untuk Rincian Transaksi Harian."""
+    sheet_name = "(2)Rincian Transaksi Harian"
+    worksheet = sheet_repo.get_sheet(sheet_name, create=False)
+    if not worksheet:
+        return
+
+    vals = worksheet.get_all_values()
+    current_p = vals[2][0] if len(vals) > 2 and vals[2] and str(vals[2][0]).strip() else "Periode: 01 Nov 2026 s/d 30 Nov 2026 Semua Unit Usaha"
+
+    rincian_headers = [
+        "Tanggal", "Nama Produk /Jasa/ Barang", "Keterangan Transaksi",
+        "Kuantitas", "Satuan", "Transaction ID",
+        "Pemasukan (Rp)", "Pengeluaran (Rp)",
+    ]
+
+    # Pastikan Judul Baris 1: Industri Pertanian Terpadu Lentera Farm TIDAK BOLEH BERUBAH
+    sheet_repo._retry_google_call(
+        worksheet.update,
+        range_name="A1:H5",
+        values=[
+            [config.COMPANY, "", "", "", "", "", "", ""],
+            ["Rincian Pemasukan dan Pengeluaran per Barang/Jasa/ Produk", "", "", "", "", "", "", ""],
+            [current_p, "", "", "", "", "", "", ""],
+            ["", "", "", "", "", "", "", ""],
+            rincian_headers,
+        ],
+    )
+
+    requests = [
+        # Format TEXT untuk baris 1-4 (A1:H4) agar Judul dan Periode tidak pernah tertimpa format DATE / NUMBER
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": 0,
+                    "endRowIndex": 4,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 8,
+                },
+                "cell": {"userEnteredFormat": {
+                    "numberFormat": {"type": "TEXT"},
+                }},
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        },
+        # Format Baris 1 Judul: 16pt Bold Navy
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": 0,
+                    "endRowIndex": 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 1,
+                },
+                "cell": {"userEnteredFormat": {
+                    "textFormat": {
+                        "foregroundColor": {"red": 0.12, "green": 0.22, "blue": 0.39},
+                        "bold": True,
+                        "fontSize": 16,
+                    },
+                }},
+                "fields": "userEnteredFormat.textFormat",
+            }
+        },
+        # Format Baris 2 Subjudul: 11pt Bold
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 2,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 1,
+                },
+                "cell": {"userEnteredFormat": {
+                    "textFormat": {
+                        "bold": True,
+                        "fontSize": 11,
+                    },
+                }},
+                "fields": "userEnteredFormat.textFormat",
+            }
+        },
+        # Format Baris 3 Periode: 10pt Italic
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": 2,
+                    "endRowIndex": 3,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 1,
+                },
+                "cell": {"userEnteredFormat": {
+                    "textFormat": {
+                        "italic": True,
+                        "fontSize": 10,
+                    },
+                }},
+                "fields": "userEnteredFormat.textFormat",
+            }
+        },
+        # Format Header Baris 5 (row index 4): Navy Background, White Bold Text, Center
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": 4,
+                    "endRowIndex": 5,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 8,
+                },
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": {"red": 0.12, "green": 0.22, "blue": 0.39},
+                    "textFormat": {
+                        "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                        "bold": True,
+                    },
+                    "horizontalAlignment": "CENTER",
+                    "verticalAlignment": "MIDDLE",
+                    "wrapStrategy": "WRAP",
+                }},
+                "fields": "userEnteredFormat",
+            }
+        },
+        # Freeze 5 rows
+        {
+            "updateSheetProperties": {
+                "properties": {
+                    "sheetId": worksheet.id,
+                    "gridProperties": {
+                        "frozenRowCount": 5,
+                    },
+                },
+                "fields": "gridProperties.frozenRowCount",
+            }
+        },
+    ]
+    sheet_repo._retry_google_call(worksheet.spreadsheet.batch_update, {"requests": requests})
+    sheet_repo.invalidate_cache(sheet_name)
+
 def _extract_transaction_record(sheet_name: str, row: list) -> TransactionRecord | None:
     is_daily = sheet_name == "(2)Rincian Transaksi Harian"
     if is_daily:
@@ -351,12 +495,16 @@ def rebuild_sheet_with_totals(sheet_name: str) -> None:
             
         is_daily = sheet_name == "(2)Rincian Transaksi Harian"
         
-        if not is_daily and sheet_name in UNIT_TITLES:
+        if is_daily:
+            setup_rincian_sheet_layout()
+            header_idx = 4
+            start_row = 6
+        elif sheet_name in UNIT_TITLES:
             setup_unit_sheet_layout(sheet_name)
             header_idx = 1
             start_row = 3
         else:
-            header_idx = 4 if is_daily else sheet_repo._detect_header_row_index(sheet_name, values)
+            header_idx = sheet_repo._detect_header_row_index(sheet_name, values)
             start_row = header_idx + 2
             
         data_rows = values[header_idx + 1:] if len(values) > header_idx + 1 else []

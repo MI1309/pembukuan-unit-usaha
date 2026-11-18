@@ -530,11 +530,13 @@ def append_rows_atomically(
                 "fields": "userEnteredValue,userEnteredFormat",
             }
         })
+        start_row_for_date = 5 if sheet_name == "(2)Rincian Transaksi Harian" else 2
         for column in date_columns:
             requests.append({
                 "repeatCell": {
                     "range": {
                         "sheetId": worksheet.id,
+                        "startRowIndex": start_row_for_date,
                         "startColumnIndex": column,
                         "endColumnIndex": column + 1,
                     },
@@ -854,8 +856,20 @@ def archive_daily_detail(archive_month: str, rows: list[list], new_period_label:
         )
     _format_daily_archive(archive)
 
-    while len(_retry_google_call(source.get_all_values)) > 5:
-        _safe_delete_rows(source, 6)
+    source_values = _retry_google_call(source.get_all_values)
+    if len(source_values) > 5:
+        # Hapus baris data lama (baris 6 ke bawah) secara atomik
+        requests = [{
+            "deleteDimension": {
+                "range": {
+                    "sheetId": source.id,
+                    "dimension": "ROWS",
+                    "startIndex": 5,
+                    "endIndex": len(source_values),
+                }
+            }
+        }]
+        _retry_google_call(source.spreadsheet.batch_update, {"requests": requests})
 
     _retry_google_call(source.update, range_name="A3", values=[[new_period_label]])
     invalidate_cache("(2)Rincian Transaksi Harian")

@@ -400,7 +400,6 @@ def rebuild_sheet_with_totals(sheet_name: str) -> None:
                 for t in week_txs:
                     inc = t.income
                     exp = t.expense
-                    running_balance = running_balance + inc - exp  # Pengurangan yang jelas
                     w_income += inc
                     w_expense += exp
                     
@@ -417,6 +416,8 @@ def rebuild_sheet_with_totals(sheet_name: str) -> None:
                             exp if exp > 0 else "",
                         ]
                     else:
+                        # Sisa Saldo per transaksi: pemasukan = positif, pengeluaran = negatif
+                        per_tx_saldo = inc if inc > 0 else -exp
                         # 10 Kolom: Nomor, Tanggal, Nama, Keterangan, Kuantitas, Satuan, Pemasukan, Pengeluaran, Saldo, TxID
                         row = [
                             str(tx_counter),
@@ -427,7 +428,7 @@ def rebuild_sheet_with_totals(sheet_name: str) -> None:
                             t.satuan,
                             inc if inc > 0 else "",
                             exp if exp > 0 else "",
-                            running_balance,
+                            per_tx_saldo,
                             t.tx_id,
                         ]
                         tx_counter += 1
@@ -440,9 +441,10 @@ def rebuild_sheet_with_totals(sheet_name: str) -> None:
                         w_income, w_expense,
                     ]
                 else:
+                    w_net = w_income - w_expense   # Bersih minggu ini: + kalau masuk, - kalau keluar
                     subtotal_row = [
                         "", "", "", p.label, "", "",
-                        w_income, w_expense, running_balance, "",
+                        w_income, w_expense, w_net, "",
                     ]
                 final_rows.append(subtotal_row)
                 total_row_indices.append(len(final_rows))
@@ -457,9 +459,10 @@ def rebuild_sheet_with_totals(sheet_name: str) -> None:
                     m_income, m_expense,
                 ]
             else:
+                m_net = m_income - m_expense
                 month_row = [
                     "", "", "", month_p.label, "", "",
-                    m_income, m_expense, running_balance, "",
+                    m_income, m_expense, m_net, "",
                 ]
             final_rows.append(month_row)
             total_row_indices.append(len(final_rows))

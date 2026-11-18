@@ -215,7 +215,8 @@ def _save_sale(sale: dict) -> list[tuple[str, list]]:
     is_sale = sale.get("is_penjualan", True)
     income = sale["penjualan"] if is_sale else ""
     expense = "" if is_sale else sale["penjualan"]
-    balance_change = sale["penjualan"] if is_sale else -sale["penjualan"]
+    # Sisa saldo per transaksi: pemasukan = positif, pengeluaran = negatif
+    per_tx_saldo = sale["penjualan"] if is_sale else -sale["penjualan"]
     quantity_text = f"{sale['kuantitas']:g} {sale['unit_kuantitas']}".strip()
     
     # Unit Usaha: 10 Kolom
@@ -229,7 +230,7 @@ def _save_sale(sale: dict) -> list[tuple[str, list]]:
         sale["satuan"],          # 5: Satuan
         income,                  # 6: Pemasukan
         expense,                 # 7: Pengeluaran
-        balance_change,          # 8: Sisa Saldo
+        per_tx_saldo,            # 8: Sisa Saldo (+ kalau masuk, - kalau keluar)
         sale["transaction_id"],  # 9: Transaction ID
     ]
     

@@ -257,50 +257,16 @@ def _ensure_transaction_id_header(worksheet) -> bool:
     header = [str(cell).strip() for cell in values[header_row_index]]
     normalized = [_normalize_header_label(cell) for cell in header]
 
-    if (
-        header_row_index > 0
-        and normalized
-        and normalized[0] == "tanggal"
-        and "sisa saldo" in normalized
-        and "transaction id" in normalized
-        and len(header) >= 9
-        and (normalized.index("sisa saldo"), normalized.index("transaction id")) != (7, 8)
-    ):
-        header[7:9] = ["Sisa Saldo", "Transaction ID"]
-        _retry_google_call(
-            worksheet.update,
-            range_name=f"A{header_row_number}:I{header_row_number}",
-            values=[header[:9]],
-        )
-        invalidate_cache(getattr(worksheet, "title", ""))
-        return True
-
     if "transaction id" in normalized:
         return False
 
-    repaired = [
-        value for index, value in enumerate(header)
-        if normalized[index] not in {"nomor", "no", "no.", "id transaksi", "transaction id"}
-    ]
-
-    insert_index = len(repaired)
-    for idx, value in enumerate(repaired):
-        if _normalize_header_label(value) == "sisa saldo":
-            insert_index = idx + 1
-            break
-    if insert_index == len(repaired):
-        for idx, value in enumerate(repaired):
-            if _normalize_header_label(value) == "pengeluaran (rp)":
-                insert_index = idx + 1
-                break
-
-    repaired.insert(insert_index, "Transaction ID")
-    width = max(len(repaired), len(header))
-    padded = repaired + [""] * max(0, width - len(repaired))
+    width = len(header)
+    col_letter = _column_name(width + 1)
     _retry_google_call(
-        worksheet.update,
-        range_name=f"A{header_row_number}:{_column_name(width)}{header_row_number}",
-        values=[padded],
+        worksheet.update_cell,
+        header_row_number,
+        width + 1,
+        "Transaction ID",
     )
     invalidate_cache(getattr(worksheet, "title", ""))
     return True
@@ -498,15 +464,21 @@ def _appended_cell_format(sheet_name: str, column: int) -> dict:
         elif column in {4, 6, 7}: # Satuan, Pemasukan, Pengeluaran
             cell_format["numberFormat"] = {"type": "CURRENCY", "pattern": '"Rp" #,##0'}
             cell_format["horizontalAlignment"] = "RIGHT"
+        elif column == 5: # Transaction ID
+            cell_format["horizontalAlignment"] = "CENTER"
             
     elif sheet_name.startswith(("(3)", "(4)", "(5)", "(6)", "(7)")):
-        # Index Unit Usaha: 0:Nomor, 1:Tgl, 2:Nama, 3:Ket, 4:Qty, 5:Satuan, 6:TxID, 7:Pemasukan, 8:Pengeluaran, 9:Saldo
-        if column == 1: # Tanggal
+        # Index Unit Usaha: 0:Nomor, 1:Tgl, 2:Nama, 3:Ket, 4:Qty, 5:Satuan, 6:Pemasukan, 7:Pengeluaran, 8:Saldo, 9:TxID
+        if column == 0: # Nomor
+            cell_format["horizontalAlignment"] = "CENTER"
+        elif column == 1: # Tanggal
             cell_format["numberFormat"] = {"type": "DATE", "pattern": "dd mmm yyyy"}
             cell_format["horizontalAlignment"] = "CENTER"
-        elif column in {5, 7, 8, 9}: # Satuan, Pemasukan, Pengeluaran, Sisa Saldo
+        elif column in {5, 6, 7, 8}: # Satuan, Pemasukan, Pengeluaran, Sisa Saldo
             cell_format["numberFormat"] = {"type": "CURRENCY", "pattern": '"Rp" #,##0'}
             cell_format["horizontalAlignment"] = "RIGHT"
+        elif column == 9: # Transaction ID
+            cell_format["horizontalAlignment"] = "CENTER"
             
     return cell_format
 
@@ -1546,7 +1518,7 @@ def format_total_row(sheet_name: str, row_index: int) -> None:
     else:
         end_column_index = 10 
         label_column_index = 3 
-        currency_start, currency_end = 7, 10 # Pemasukan (7), Pengeluaran (8), Saldo (9)
+        currency_start, currency_end = 6, 9 # Pemasukan (6), Pengeluaran (7), Saldo (8)
 
     background = (
         {"red": 0.82, "green": 0.91, "blue": 0.84}

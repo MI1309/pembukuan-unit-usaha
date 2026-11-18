@@ -10,7 +10,7 @@ from app.repositories import sheet_repo
 
 
 LEDGER_HEADERS = [
-    "Tanggal", "Nama Barang/Jasa /Produk", "Keterangan Transaksi",
+    "Nomor", "Tanggal", "Nama Barang/Jasa /Produk", "Keterangan Transaksi",
     "Kuantitas", "Satuan", "Pemasukan (Rp)", "Pengeluaran (Rp)", "Sisa Saldo", "Transaction ID",
 ]
 DAILY_DETAIL_HEADERS = [

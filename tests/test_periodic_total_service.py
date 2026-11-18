@@ -24,8 +24,12 @@ def test_total_row_balance_is_income_minus_expense():
     deficit = _build_total_row("Unit", period, PeriodTotal(period, 100, 150, 900))
     surplus = _build_total_row("Unit", period, PeriodTotal(period, 150, 100, -900))
 
-    assert deficit[7] == -50
-    assert surplus[7] == 50
+    assert deficit[6] == 100
+    assert deficit[7] == 150
+    assert deficit[8] == 900
+    assert surplus[6] == 150
+    assert surplus[7] == 100
+    assert surplus[8] == -900
 
 @patch("app.repositories.sheet_repo.get_sheet")
 def test_compute_period_total(mock_get_sheet):

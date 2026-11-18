@@ -218,7 +218,8 @@ def _save_sale(sale: dict) -> list[tuple[str, list]]:
     balance_change = sale["penjualan"] if is_sale else -sale["penjualan"]
     quantity_text = f"{sale['kuantitas']:g} {sale['unit_kuantitas']}".strip()
     
-    # Unit Usaha: 10 Kolom (transaction_id sebelum Pemasukan)
+    # Unit Usaha: 10 Kolom
+    # 0:Nomor, 1:Tanggal, 2:Nama, 3:Keterangan, 4:Kuantitas, 5:Satuan, 6:Pemasukan, 7:Pengeluaran, 8:Sisa Saldo, 9:Transaction ID
     unit_row = [
         "",                      # 0: Nomor
         sale["tanggal"],         # 1: Tanggal
@@ -226,10 +227,10 @@ def _save_sale(sale: dict) -> list[tuple[str, list]]:
         sale["keterangan"],      # 3: Keterangan
         quantity_text,           # 4: Kuantitas
         sale["satuan"],          # 5: Satuan
-        sale["transaction_id"],  # 6: transaction_id
-        income,                  # 7: Pemasukan
-        expense,                 # 8: Pengeluaran
-        balance_change           # 9: Sisa Saldo
+        income,                  # 6: Pemasukan
+        expense,                 # 7: Pengeluaran
+        balance_change,          # 8: Sisa Saldo
+        sale["transaction_id"],  # 9: Transaction ID
     ]
     
     # Rincian Harian: 8 Kolom (transaction_id geser ke index 5, hapus Sisa Saldo)
@@ -413,7 +414,7 @@ def process_sales(message: str, confirmed: bool = False, sender: str = "") -> tu
         try:
             # --- OPTIMASI KUOTA: REBUILD SEKALI JALAN ---
             from app.services.periodic_total_service import rebuild_sheet_with_totals
-            units_affected = set(sale["unit"] for sale in prepared)
+            units_affected = set(sale["unit"] for sale in saved)
             units_affected.add("(2)Rincian Transaksi Harian")
             
             for unit_name in units_affected:
@@ -868,3 +869,11 @@ def _process_recap_period(year: int, month: int, kind: str, label: str, force: b
     failures = [unit for unit, result in results.items() if isinstance(result, Exception)]
     if failures:
         raise RuntimeError(f"recap failed for {label}, units: {', '.join(failures)}")
+
+
+def _refresh_current_period_totals(now: datetime, trigger_source: str) -> None:
+    periodic_total_service.rebuild_all_sheets_with_totals()
+
+
+def _refresh_saved_periods(saved_sales: list[dict], trigger_source: str) -> None:
+    periodic_total_service.rebuild_all_sheets_with_totals()

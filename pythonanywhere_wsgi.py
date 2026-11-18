@@ -72,6 +72,30 @@ def application(environ, start_response):
         except Exception as error:
             return _response(start_response, "500 Internal Server Error", {"status": "error", "message": str(error)})
 
+    if path == "/api/cron/archive":
+        payload = _payload_from_environ(environ)
+        key = payload.get("key") or environ.get("HTTP_X_CRON_KEY")
+        from app.config import config
+        expected_key = getattr(config, "CRON_SECRET", None) or getattr(config, "WEBHOOK_SECRET", None) or "agrinova2026"
+        if not key or key != expected_key:
+            return _response(start_response, "403 Forbidden", {
+                "status": "error",
+                "message": "Akses ditolak: Kunci cron tidak valid",
+                "hint": "Gunakan ?key=agrinova2026 (atau nilai CRON_SECRET / WEBHOOK_SECRET di .env Anda)"
+            })
+
+        try:
+            from app.services.archive_service import get_target_archive_month, archive_month_ledger
+            year_str = str(payload.get("year") or "").strip()
+            month_str = str(payload.get("month") or "").strip()
+            year_val = int(year_str) if year_str.isdigit() else None
+            month_val = int(month_str) if month_str.isdigit() else None
+            target_year, target_month = get_target_archive_month(year_val, month_val)
+            result = archive_month_ledger(target_year, target_month)
+            return _response(start_response, "200 OK", result)
+        except Exception as error:
+            return _response(start_response, "500 Internal Server Error", {"status": "error", "message": str(error)})
+
     if method == "POST" and path == "/webhook":
         try:
             result = process_webhook_payload(_payload_from_environ(environ))

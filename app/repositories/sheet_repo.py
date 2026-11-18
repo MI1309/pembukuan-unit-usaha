@@ -489,25 +489,26 @@ def _appended_cell_format(sheet_name: str, column: int) -> dict:
             }
         },
     }
+    
     if sheet_name == "(2)Rincian Transaksi Harian":
+        # Index Rincian: 0:Tgl, 1:Nama, 2:Ket, 3:Qty, 4:Satuan, 5:TxID, 6:Pemasukan, 7:Pengeluaran
         if column == 0:
             cell_format["numberFormat"] = {"type": "DATE", "pattern": "dd mmm yyyy"}
             cell_format["horizontalAlignment"] = "CENTER"
-        elif column in {4, 5, 6}:
+        elif column in {4, 6, 7}: # Satuan, Pemasukan, Pengeluaran
             cell_format["numberFormat"] = {"type": "CURRENCY", "pattern": '"Rp" #,##0'}
             cell_format["horizontalAlignment"] = "RIGHT"
+            
     elif sheet_name.startswith(("(3)", "(4)", "(5)", "(6)", "(7)")):
-        if column == 0:
+        # Index Unit Usaha: 0:Nomor, 1:Tgl, 2:Nama, 3:Ket, 4:Qty, 5:Satuan, 6:TxID, 7:Pemasukan, 8:Pengeluaran, 9:Saldo
+        if column == 1: # Tanggal
             cell_format["numberFormat"] = {"type": "DATE", "pattern": "dd mmm yyyy"}
             cell_format["horizontalAlignment"] = "CENTER"
-        elif column == 4:
-            cell_format["numberFormat"] = {"type": "NUMBER", "pattern": "#,##0"}
-            cell_format["horizontalAlignment"] = "RIGHT"
-        elif column in {5, 6, 7}:
+        elif column in {5, 7, 8, 9}: # Satuan, Pemasukan, Pengeluaran, Sisa Saldo
             cell_format["numberFormat"] = {"type": "CURRENCY", "pattern": '"Rp" #,##0'}
             cell_format["horizontalAlignment"] = "RIGHT"
+            
     return cell_format
-
 
 def append_rows_atomically(
     rows_by_sheet: list[tuple[str, list]], *, _refreshed_stale_grid: bool = False,
@@ -1621,9 +1622,7 @@ def format_total_row(sheet_name: str, row_index: int) -> None:
 
 @retry_google_api()
 def rewrite_period_block(sheet_name: str, start_row: int, end_row: int, new_rows: list[list]) -> None:
-    """Ganti blok [start_row, end_row] dengan new_rows via
-    spreadsheets.batchUpdate (atomik). Invalidasi cache.
-    start_row dan end_row adalah 1-based index."""
+    """Ganti blok [start_row, end_row] dengan new_rows via batchUpdate (atomik)."""
     if not new_rows:
         return
     if len(new_rows) != (end_row - start_row + 1):
@@ -1638,15 +1637,21 @@ def rewrite_period_block(sheet_name: str, start_row: int, end_row: int, new_rows
         rows = []
         for row in new_rows:
             cells = []
-            for value in row + [""] * (width - len(row)):
+            for column, value in enumerate(row + [""] * (width - len(row))):
                 if isinstance(value, bool):
                     entered_value = {"boolValue": value}
                 elif isinstance(value, (int, float)):
                     entered_value = {"numberValue": value}
                 else:
                     entered_value = {"stringValue": str(value or "")}
-                cells.append({"userEnteredValue": entered_value})
+                
+                # PERBAIKAN: Sertakan format (warna/angka) saat menulis ulang data
+                cells.append({
+                    "userEnteredValue": entered_value,
+                    "userEnteredFormat": _appended_cell_format(sheet_name, column)
+                })
             rows.append({"values": cells})
+            
         body = {"requests": [{
             "updateCells": {
                 "range": {
@@ -1657,7 +1662,7 @@ def rewrite_period_block(sheet_name: str, start_row: int, end_row: int, new_rows
                     "endColumnIndex": width,
                 },
                 "rows": rows,
-                "fields": "userEnteredValue",
+                "fields": "userEnteredValue,userEnteredFormat", # PERBAIKAN: Wajib ditambahkan
             }
         }]}
         return _retry_google_call(spreadsheet.batch_update, body)
@@ -1680,7 +1685,6 @@ def rewrite_period_block(sheet_name: str, start_row: int, end_row: int, new_rows
         except Exception:
             raise original_error
     invalidate_cache(sheet_name)
-
 
 @retry_google_api()
 def delete_rows_bottom_up(sheet_name: str, row_indices: list[int]) -> int:
